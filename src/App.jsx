@@ -22,6 +22,18 @@ function Stat({ label, value, change, down }) {
   </article>
 }
 
+function WorkspaceView({ page, onBack }) {
+  const copy = {
+    'Health score': ['Business health', 'A clear breakdown of what supports — and weakens — business performance.', ['Profitability 74', 'Growth 88', 'Customer health 86', 'Data confidence 91']],
+    Explore: ['Data explorer', 'Browse metrics and dimensions without writing SQL.', ['Revenue by region', 'Product performance', 'Customer segments', 'Data quality rules']],
+    Forecasts: ['Forecast studio', 'Forward-looking views with assumptions and confidence ranges.', ['Revenue outlook', 'Demand planning', 'Cash position', 'Forecast assumptions']],
+    Simulator: ['Decision lab', 'Model a business move before committing budget or inventory.', ['Pricing test', 'Marketing plan', 'Supplier cost model', 'Saved scenarios']],
+    Reports: ['Reports', 'Create concise updates for leadership and teams.', ['Weekly business brief', 'Data quality report', 'Board summary', 'Export centre']],
+    Settings: ['Workspace settings', 'Manage your profile, data policies and integrations.', ['Profile & notifications', 'Data retention', 'AI provider', 'Connected sources']],
+  }[page] || ['Workspace', 'Choose a workspace area.', []]
+  return <section className="workspace-page"><button className="back-btn" onClick={onBack}>← Overview</button><p className="eyebrow">PIVOT WORKSPACE</p><h1>{copy[0]}</h1><p>{copy[1]}</p><div className="workspace-grid">{copy[2].map((item, index) => <button key={item} className="workspace-card"><span>0{index + 1}</span><b>{item}</b><small>Open workspace →</small></button>)}</div><div className="workspace-note"><ShieldCheck size={19}/><div><b>Built for traceable decisions</b><p>Every result should connect back to a dataset, a method, and an assumption.</p></div></div></section>
+}
+
 function App() {
   const [active, setActive] = useState('Overview')
   const [dark, setDark] = useState(false)
@@ -91,15 +103,15 @@ function App() {
       <div className="brand"><span>V</span><b>verdant</b></div>
       <div className="workspace"><div className="avatar">FN</div><div><b>Field Notes</b><small>Growth workspace</small></div><ChevronRight size={16} /></div>
       <nav>{nav.map(([Icon, item]) => <button key={item} className={active === item ? 'selected' : ''} onClick={() => setActive(item)}><Icon size={18} />{item}</button>)}</nav>
-      <div className="sidebar-foot"><button><Settings size={18} />Settings</button><button><CircleHelp size={18} />Help centre</button><div className="profile"><div className="avatar peach">AK</div><div><b>Amelia King</b><small>Owner</small></div><MoreHorizontal size={17} /></div></div>
+      <div className="sidebar-foot"><button onClick={() => setActive('Settings')}><Settings size={18} />Settings</button><button onClick={() => setAnswer('Support is ready. Upload a dataset, then ask a question in the Pivot analyst panel.') }><CircleHelp size={18} />Help centre</button><div className="profile"><div className="avatar peach">AK</div><div><b>Amelia King</b><small>Owner</small></div><MoreHorizontal size={17} /></div></div>
     </aside>
 
     <main>
       <header>
-        <div className="crumb"><span>Overview</span><small>Tuesday, 14 July</small></div>
+        <div className="crumb"><span>{active}</span><small>Tuesday, 14 July</small></div>
         <div className="head-actions"><button className="icon-btn" onClick={() => setDark(!dark)}>{dark ? <Sun size={18} /> : <Moon size={18} />}</button><button className="icon-btn"><Bell size={18} /><i /></button><button className="upload-btn" onClick={() => setPanel(true)}><CloudUpload size={17} />Add data</button></div>
       </header>
-      <section className="intro"><div><p className="eyebrow">YOUR BUSINESS, AT A GLANCE</p><h1>Good morning, Amelia.</h1><p className="sub">Here’s the clearest picture of your business right now.</p></div><button className="date"><CalendarDays size={16} />Last 30 days <ChevronRight size={15} /></button></section>
+      {active !== 'Overview' ? <WorkspaceView page={active} onBack={() => setActive('Overview')} /> : <><section className="intro"><div><p className="eyebrow">YOUR BUSINESS, AT A GLANCE</p><h1>Good morning, Amelia.</h1><p className="sub">Here’s the clearest picture of your business right now.</p></div><button className="date"><CalendarDays size={16} />Last 30 days <ChevronRight size={15} /></button></section>
 
       {upload && <section className="data-banner"><ShieldCheck size={18}/><div><b>{upload.type} is ready for analysis</b><span>{upload.rows} records · Data quality {upload.quality}/100 · {upload.issues?.length || 0} quality signals detected</span></div><button onClick={() => setActive('Explore')}>Review profile <ChevronRight size={15}/></button></section>}
       <section className="health-row">
@@ -116,7 +128,7 @@ function App() {
       <section className="insight-section"><div className="section-title"><div><p className="eyebrow">WHAT NEEDS ATTENTION</p><h2>Signals worth acting on</h2></div><button className="text-btn">View all insights <ChevronRight size={15}/></button></div><div className="finding-grid">{findings.map((item) => <article className={`finding ${item.type}`} key={item.title}><div className="finding-icon">{item.type === 'risk' ? <ShieldCheck size={18}/> : item.type === 'opportunity' ? <Sparkles size={18}/> : <Package size={18}/>}</div><small>{item.type}</small><h3>{item.title}</h3><p>{item.body}</p><button>{item.action} <ChevronRight size={15}/></button></article>)}</div></section>
 
       <section className="bottom-grid"><article className="simulator"><div><p className="eyebrow">DECISION LAB</p><h2>Test a move before you make it.</h2><p>Adjust the levers and see the likely revenue effect.</p></div><div className="sliders">{[['Price change', 'price'], ['Marketing spend', 'marketing'], ['Supplier costs', 'costs']].map(([label, key]) => <label key={key}>{label}<b>{scenario[key] > 0 ? '+' : ''}{scenario[key]}%</b><input type="range" min="-15" max="20" value={scenario[key]} onChange={(e) => updateScenario({ ...scenario, [key]: Number(e.target.value) })}/></label>)}</div><div className="projection"><small>PROJECTED MONTHLY REVENUE</small><strong>{formatMoney(projection)}</strong><span><ArrowUpRight size={14}/> {scenarioResult?.change ?? ((projection / 238000 - 1) * 100).toFixed(1)}% from baseline</span></div></article>
-        <article className="consultant"><div className="consultant-head"><div className="bot"><Bot size={18}/></div><div><b>Pivot analyst <i className="live-dot"/></b><small>{upload?.id ? 'Grounded in your dataset · live' : 'Evidence-backed answers'}</small></div></div><p className={`answer ${busy ? 'thinking' : ''}`}>{busy ? 'Reading metadata, lineage and relevant records' : answer}</p>{busy && <div className="typing"><i/><i/><i/></div>}<div className="ask"><input value={question} onChange={(e) => setQuestion(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && ask()} placeholder="Ask about your business..."/><button onClick={ask}><Send size={16}/></button></div></article></section>
+        <article className="consultant"><div className="consultant-head"><div className="bot"><Bot size={18}/></div><div><b>Pivot analyst <i className="live-dot"/></b><small>{upload?.id ? 'Grounded in your dataset · live' : 'Evidence-backed answers'}</small></div></div><p className={`answer ${busy ? 'thinking' : ''}`}>{busy ? 'Reading metadata, lineage and relevant records' : answer}</p>{busy && <div className="typing"><i/><i/><i/></div>}<div className="ask"><input value={question} onChange={(e) => setQuestion(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && ask()} placeholder="Ask about your business..."/><button onClick={ask}><Send size={16}/></button></div></article></section></>}
     </main>
 
     {panel && <div className="modal-backdrop" onMouseDown={() => setPanel(false)}><section className="upload-modal" onMouseDown={(e) => e.stopPropagation()}><button className="close" onClick={() => setPanel(false)}>×</button><div className="upload-mark"><CloudUpload size={26}/></div><p className="eyebrow">DATA INTAKE</p><h2>Add a business dataset</h2><p>Drop in CSV or Excel. Verdant profiles the schema, quality risks, keys and business role automatically.</p><button className="dropzone" onClick={() => fileRef.current.click()}><FileSpreadsheet size={24}/><b>{busy ? 'Profiling data…' : 'Choose CSV or Excel'}</b><span>or drag and drop it here</span></button><input ref={fileRef} type="file" accept=".csv,.xlsx,.xls,text/csv" hidden onChange={(e) => handleUpload(e.target.files?.[0])}/>{upload && <div className="upload-result"><b>{upload.name}</b><span>{upload.rows} records · quality {upload.quality}/100 · {upload.type}</span></div>}<small className="supported">Secure API profiling · Excel, CSV supported · Sheets and SQL connectors ready to add</small></section></div>}

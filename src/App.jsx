@@ -8,6 +8,8 @@ import { Area, AreaChart, Cell, Pie, PieChart, ResponsiveContainer, Tooltip, XAx
 import { findings, notes, revenue, segments } from './data'
 import { formatMoney, inferDataset, parseCsv } from './utils'
 
+const api = import.meta.env.VITE_API_URL || 'http://localhost:8000'
+
 const nav = [
   [LayoutDashboard, 'Overview'], [Activity, 'Health score'], [BarChart3, 'Explore'],
   [Target, 'Forecasts'], [Package, 'Simulator'], [FileSpreadsheet, 'Reports'],
@@ -26,29 +28,56 @@ function App() {
   const [panel, setPanel] = useState(false)
   const [upload, setUpload] = useState(null)
   const [scenario, setScenario] = useState({ price: 0, marketing: 0, costs: 0 })
+  const [scenarioResult, setScenarioResult] = useState(null)
+  const [busy, setBusy] = useState(false)
   const [question, setQuestion] = useState('')
   const [answer, setAnswer] = useState('Ask a question about your business. I’ll ground the answer in the data currently on screen.')
   const fileRef = useRef()
-  const projection = useMemo(() => 238000 * (1 + scenario.price / 100 + scenario.marketing / 200 - scenario.costs / 150), [scenario])
+  const projection = useMemo(() => scenarioResult?.revenue || 238000 * (1 + scenario.price / 100 + scenario.marketing / 200 - scenario.costs / 150), [scenario, scenarioResult])
 
-  function handleUpload(file) {
+  async function handleUpload(file) {
     if (!file) return
+    setBusy(true)
+    try {
+      const form = new FormData(); form.append('file', file)
+      const response = await fetch(`${api}/api/profile`, { method: 'POST', body: form })
+      if (response.ok) {
+        const result = await response.json()
+        setUpload({ name: result.file_name, rows: result.rows, headers: Array(result.columns).fill('field'), type: result.role, quality: result.quality_score, issues: result.issues })
+        setPanel(false); setBusy(false); return
+      }
+    } catch { /* API is optional in front-end demo mode */ }
     const reader = new FileReader()
     reader.onload = () => {
       const data = parseCsv(String(reader.result))
-      setUpload({ name: file.name, ...data, type: inferDataset(data.headers) })
+      setUpload({ name: file.name, rows: data.rows.length, headers: data.headers, type: inferDataset(data.headers), quality: 84, issues: [] })
       setPanel(false)
+      setBusy(false)
     }
     reader.readAsText(file)
   }
 
-  function ask() {
+  async function updateScenario(next) {
+    setScenario(next)
+    try {
+      const response = await fetch(`${api}/api/scenario`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ price_change: next.price, marketing_change: next.marketing, cost_change: next.costs }) })
+      if (response.ok) setScenarioResult(await response.json())
+    } catch { setScenarioResult(null) }
+  }
+
+  async function ask() {
     const text = question.trim().toLowerCase()
     if (!text) return
+    setBusy(true)
+    try {
+      const response = await fetch(`${api}/api/chat`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ question, context: { revenue: 238000, revenue_growth: '10.2%', gross_margin: '38.4%', margin_change: '-1.8 points', shipping_cost_growth: '18%', data_quality: upload?.quality } }) })
+      if (response.ok) { setAnswer((await response.json()).answer); setQuestion(''); setBusy(false); return }
+    } catch { /* fall back to local concise answers */ }
     if (text.includes('profit') || text.includes('margin')) setAnswer('Profitability softened because fulfillment costs increased 18% while revenue rose 11%. The West region creates 42% of the shipping increase. Renegotiating carrier rates there is the highest-impact next action.')
     else if (text.includes('churn') || text.includes('customer')) setAnswer('Customer health remains positive: repeat buyers drive 54% of revenue. Eighteen accounts show lower engagement and should receive a targeted retention touchpoint before their next renewal window.')
     else setAnswer('Revenue is trending up and expected to finish 12% above last quarter. The main constraint is margin pressure from shipping and returns; see the insights panel for the supporting signals.')
     setQuestion('')
+    setBusy(false)
   }
 
   function exportReport() {
@@ -72,6 +101,7 @@ function App() {
       </header>
       <section className="intro"><div><p className="eyebrow">YOUR BUSINESS, AT A GLANCE</p><h1>Good morning, Amelia.</h1><p className="sub">Here’s the clearest picture of your business right now.</p></div><button className="date"><CalendarDays size={16} />Last 30 days <ChevronRight size={15} /></button></section>
 
+      {upload && <section className="data-banner"><ShieldCheck size={18}/><div><b>{upload.type} is ready for analysis</b><span>{upload.rows} records · Data quality {upload.quality}/100 · {upload.issues?.length || 0} quality signals detected</span></div><button onClick={() => setActive('Explore')}>Review profile <ChevronRight size={15}/></button></section>}
       <section className="health-row">
         <article className="health-card"><div className="card-title"><span>Business health</span><button><MoreHorizontal size={18} /></button></div><div className="health-main"><div className="score"><svg viewBox="0 0 120 120"><circle cx="60" cy="60" r="49"/><circle className="meter" cx="60" cy="60" r="49"/></svg><div><strong>82</strong><small>/100</small></div></div><div><h2>Looking healthy</h2><p>Your growth is steady. Margin pressure is the one area worth addressing this month.</p><button className="text-btn" onClick={() => setActive('Health score')}>See score details <ChevronRight size={15} /></button></div></div><div className="pill-row"><span><b>↑</b> Growth strong</span><span><b>!</b> Margin watch</span><span><b>✓</b> Customers solid</span></div></article>
         <article className="brief-card"><div className="card-title"><span>Executive brief</span><Sparkles size={17} /></div><h3>One minute read</h3>{notes.map((note) => <p key={note}><span>•</span>{note}</p>)}<button className="brief-link" onClick={exportReport}>Download brief <Download size={15} /></button></article>
@@ -85,12 +115,12 @@ function App() {
 
       <section className="insight-section"><div className="section-title"><div><p className="eyebrow">WHAT NEEDS ATTENTION</p><h2>Signals worth acting on</h2></div><button className="text-btn">View all insights <ChevronRight size={15}/></button></div><div className="finding-grid">{findings.map((item) => <article className={`finding ${item.type}`} key={item.title}><div className="finding-icon">{item.type === 'risk' ? <ShieldCheck size={18}/> : item.type === 'opportunity' ? <Sparkles size={18}/> : <Package size={18}/>}</div><small>{item.type}</small><h3>{item.title}</h3><p>{item.body}</p><button>{item.action} <ChevronRight size={15}/></button></article>)}</div></section>
 
-      <section className="bottom-grid"><article className="simulator"><div><p className="eyebrow">DECISION LAB</p><h2>Test a move before you make it.</h2><p>Adjust the levers and see the likely revenue effect.</p></div><div className="sliders">{[['Price change', 'price'], ['Marketing spend', 'marketing'], ['Supplier costs', 'costs']].map(([label, key]) => <label key={key}>{label}<b>{scenario[key] > 0 ? '+' : ''}{scenario[key]}%</b><input type="range" min="-15" max="20" value={scenario[key]} onChange={(e) => setScenario({ ...scenario, [key]: Number(e.target.value) })}/></label>)}</div><div className="projection"><small>PROJECTED MONTHLY REVENUE</small><strong>{formatMoney(projection)}</strong><span><ArrowUpRight size={14}/> {((projection / 238000 - 1) * 100).toFixed(1)}% from baseline</span></div></article>
+      <section className="bottom-grid"><article className="simulator"><div><p className="eyebrow">DECISION LAB</p><h2>Test a move before you make it.</h2><p>Adjust the levers and see the likely revenue effect.</p></div><div className="sliders">{[['Price change', 'price'], ['Marketing spend', 'marketing'], ['Supplier costs', 'costs']].map(([label, key]) => <label key={key}>{label}<b>{scenario[key] > 0 ? '+' : ''}{scenario[key]}%</b><input type="range" min="-15" max="20" value={scenario[key]} onChange={(e) => updateScenario({ ...scenario, [key]: Number(e.target.value) })}/></label>)}</div><div className="projection"><small>PROJECTED MONTHLY REVENUE</small><strong>{formatMoney(projection)}</strong><span><ArrowUpRight size={14}/> {scenarioResult?.change ?? ((projection / 238000 - 1) * 100).toFixed(1)}% from baseline</span></div></article>
         <article className="consultant"><div className="consultant-head"><div className="bot"><Bot size={18}/></div><div><b>Verdant analyst</b><small>Evidence-backed answers</small></div></div><p className="answer">{answer}</p><div className="ask"><input value={question} onChange={(e) => setQuestion(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && ask()} placeholder="Ask about your business..."/><button onClick={ask}><Send size={16}/></button></div></article></section>
     </main>
 
-    {panel && <div className="modal-backdrop" onMouseDown={() => setPanel(false)}><section className="upload-modal" onMouseDown={(e) => e.stopPropagation()}><button className="close" onClick={() => setPanel(false)}>×</button><div className="upload-mark"><CloudUpload size={26}/></div><p className="eyebrow">DATA INTAKE</p><h2>Add a business dataset</h2><p>Drop in a CSV to profile it, identify its role, and bring it into your health scan.</p><button className="dropzone" onClick={() => fileRef.current.click()}><FileSpreadsheet size={24}/><b>Choose a CSV file</b><span>or drag and drop it here</span></button><input ref={fileRef} type="file" accept=".csv,text/csv" hidden onChange={(e) => handleUpload(e.target.files?.[0])}/>{upload && <div className="upload-result"><b>{upload.name}</b><span>{upload.rows.length} records · {upload.headers.length} fields · {upload.type}</span></div>}<small className="supported">CSV supported now · XLSX, Sheets and databases can be connected next</small></section></div>}
-    {upload && <div className="toast"><ShieldCheck size={18}/><div><b>{upload.type} detected</b><span>{upload.rows.length} records ready for analysis</span></div><button onClick={() => setUpload(null)}>×</button></div>}
+    {panel && <div className="modal-backdrop" onMouseDown={() => setPanel(false)}><section className="upload-modal" onMouseDown={(e) => e.stopPropagation()}><button className="close" onClick={() => setPanel(false)}>×</button><div className="upload-mark"><CloudUpload size={26}/></div><p className="eyebrow">DATA INTAKE</p><h2>Add a business dataset</h2><p>Drop in CSV or Excel. Verdant profiles the schema, quality risks, keys and business role automatically.</p><button className="dropzone" onClick={() => fileRef.current.click()}><FileSpreadsheet size={24}/><b>{busy ? 'Profiling data…' : 'Choose CSV or Excel'}</b><span>or drag and drop it here</span></button><input ref={fileRef} type="file" accept=".csv,.xlsx,.xls,text/csv" hidden onChange={(e) => handleUpload(e.target.files?.[0])}/>{upload && <div className="upload-result"><b>{upload.name}</b><span>{upload.rows} records · quality {upload.quality}/100 · {upload.type}</span></div>}<small className="supported">Secure API profiling · Excel, CSV supported · Sheets and SQL connectors ready to add</small></section></div>}
+    {upload && <div className="toast"><ShieldCheck size={18}/><div><b>{upload.type} detected</b><span>{upload.rows} records ready for analysis</span></div><button onClick={() => setUpload(null)}>×</button></div>}
   </div>
 }
 

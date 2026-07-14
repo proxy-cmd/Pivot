@@ -1,139 +1,39 @@
-import { useMemo, useRef, useState } from 'react'
-import {
-  Activity, ArrowDownRight, ArrowUpRight, BarChart3, Bell, Bot, CalendarDays, ChevronRight,
-  CircleHelp, CloudUpload, Download, FileSpreadsheet, Gauge, LayoutDashboard, Moon, MoreHorizontal,
-  Package, PanelLeftClose, Search, Send, Settings, ShieldCheck, Sparkles, Sun, Target, Users,
-} from 'lucide-react'
-import { Area, AreaChart, Cell, Pie, PieChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
-import { findings, notes, revenue, segments } from './data'
-import { formatMoney, inferDataset, parseCsv } from './utils'
+import { useRef, useState } from 'react'
+import { Bot, CheckCircle2, ChevronRight, Database, FileText, GitBranch, LoaderCircle, Play, Search, Settings, ShieldCheck, Sparkles, Upload, Wand2 } from 'lucide-react'
 
 const api = import.meta.env.VITE_API_URL || 'http://localhost:8000'
-
-const nav = [
-  [LayoutDashboard, 'Overview'], [Activity, 'Health score'], [BarChart3, 'Explore'],
-  [Target, 'Forecasts'], [Package, 'Simulator'], [FileSpreadsheet, 'Reports'],
-]
-
-function Stat({ label, value, change, down }) {
-  return <article className="stat-card">
-    <span>{label}</span><strong>{value}</strong>
-    <small className={down ? 'down' : 'up'}>{down ? <ArrowDownRight size={14} /> : <ArrowUpRight size={14} />}{change} <i>vs last period</i></small>
-  </article>
-}
-
-function WorkspaceView({ page, onBack }) {
-  const copy = {
-    'Health score': ['Business health', 'A clear breakdown of what supports — and weakens — business performance.', ['Profitability 74', 'Growth 88', 'Customer health 86', 'Data confidence 91']],
-    Explore: ['Data explorer', 'Browse metrics and dimensions without writing SQL.', ['Revenue by region', 'Product performance', 'Customer segments', 'Data quality rules']],
-    Forecasts: ['Forecast studio', 'Forward-looking views with assumptions and confidence ranges.', ['Revenue outlook', 'Demand planning', 'Cash position', 'Forecast assumptions']],
-    Simulator: ['Decision lab', 'Model a business move before committing budget or inventory.', ['Pricing test', 'Marketing plan', 'Supplier cost model', 'Saved scenarios']],
-    Reports: ['Reports', 'Create concise updates for leadership and teams.', ['Weekly business brief', 'Data quality report', 'Board summary', 'Export centre']],
-    Settings: ['Workspace settings', 'Manage your profile, data policies and integrations.', ['Profile & notifications', 'Data retention', 'AI provider', 'Connected sources']],
-  }[page] || ['Workspace', 'Choose a workspace area.', []]
-  return <section className="workspace-page"><button className="back-btn" onClick={onBack}>← Overview</button><p className="eyebrow">PIVOT WORKSPACE</p><h1>{copy[0]}</h1><p>{copy[1]}</p><div className="workspace-grid">{copy[2].map((item, index) => <button key={item} className="workspace-card"><span>0{index + 1}</span><b>{item}</b><small>Open workspace →</small></button>)}</div><div className="workspace-note"><ShieldCheck size={19}/><div><b>Built for traceable decisions</b><p>Every result should connect back to a dataset, a method, and an assumption.</p></div></div></section>
-}
+const nav = ['Overview', 'Profile', 'Quality', 'Cleaning', 'Analysis', 'AI Analyst', 'SQL', 'Reports', 'Versions', 'Lineage']
 
 function App() {
-  const [active, setActive] = useState('Overview')
-  const [dark, setDark] = useState(false)
-  const [panel, setPanel] = useState(false)
-  const [upload, setUpload] = useState(null)
-  const [scenario, setScenario] = useState({ price: 0, marketing: 0, costs: 0 })
-  const [scenarioResult, setScenarioResult] = useState(null)
-  const [busy, setBusy] = useState(false)
-  const [question, setQuestion] = useState('')
-  const [answer, setAnswer] = useState('Ask a question about your business. I’ll ground the answer in the data currently on screen.')
-  const fileRef = useRef()
-  const projection = useMemo(() => scenarioResult?.revenue || 238000 * (1 + scenario.price / 100 + scenario.marketing / 200 - scenario.costs / 150), [scenario, scenarioResult])
-
-  async function handleUpload(file) {
+  const [data, setData] = useState(null), [page, setPage] = useState('Overview'), [busy, setBusy] = useState(false), [message, setMessage] = useState('')
+  const [question, setQuestion] = useState(''), [answer, setAnswer] = useState(null), [sql, setSql] = useState('SELECT * FROM dataset LIMIT 20')
+  const input = useRef()
+  async function upload(file) {
     if (!file) return
-    setBusy(true)
-    try {
-      const form = new FormData(); form.append('file', file)
-      const response = await fetch(`${api}/api/profile`, { method: 'POST', body: form })
-      if (response.ok) {
-        const result = await response.json()
-        setUpload({ id: result.dataset_id, name: result.file_name, rows: result.rows, headers: Array(result.columns).fill('field'), type: result.role, quality: result.quality_score, issues: result.issues, recommendations: result.recommendations })
-        setPanel(false); setBusy(false); return
-      }
-    } catch { /* API is optional in front-end demo mode */ }
-    const reader = new FileReader()
-    reader.onload = () => {
-      const data = parseCsv(String(reader.result))
-      setUpload({ name: file.name, rows: data.rows.length, headers: data.headers, type: inferDataset(data.headers), quality: 84, issues: [] })
-      setPanel(false)
-      setBusy(false)
-    }
-    reader.readAsText(file)
+    setBusy(true); setMessage('Reading your file and building its data profile…')
+    try { const fd = new FormData(); fd.append('file', file); const r = await fetch(`${api}/api/datasets`, { method: 'POST', body: fd }); if (!r.ok) throw new Error('We could not read this file. Try a CSV, Excel, JSON, or Parquet file.'); const result = await r.json(); setData(result); setMessage('Your dataset is ready. Start with its profile or data quality checks.'); setPage('Overview') } catch (e) { setMessage(e.message) } finally { setBusy(false) }
   }
-
-  async function updateScenario(next) {
-    setScenario(next)
-    try {
-      const response = await fetch(`${api}/api/scenario`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ price_change: next.price, marketing_change: next.marketing, cost_change: next.costs }) })
-      if (response.ok) setScenarioResult(await response.json())
-    } catch { setScenarioResult(null) }
-  }
-
-  async function ask() {
-    const text = question.trim().toLowerCase()
-    if (!text) return
-    setBusy(true)
-    try {
-      const response = await fetch(`${api}/api/chat`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ question, dataset_id: upload?.id, context: { revenue: 238000, revenue_growth: '10.2%', gross_margin: '38.4%', margin_change: '-1.8 points', shipping_cost_growth: '18%', data_quality: upload?.quality } }) })
-      if (response.ok) { setAnswer((await response.json()).answer); setQuestion(''); setBusy(false); return }
-    } catch { /* fall back to local concise answers */ }
-    if (text.includes('profit') || text.includes('margin')) setAnswer('Profitability softened because fulfillment costs increased 18% while revenue rose 11%. The West region creates 42% of the shipping increase. Renegotiating carrier rates there is the highest-impact next action.')
-    else if (text.includes('churn') || text.includes('customer')) setAnswer('Customer health remains positive: repeat buyers drive 54% of revenue. Eighteen accounts show lower engagement and should receive a targeted retention touchpoint before their next renewal window.')
-    else setAnswer('Revenue is trending up and expected to finish 12% above last quarter. The main constraint is margin pressure from shipping and returns; see the insights panel for the supporting signals.')
-    setQuestion('')
-    setBusy(false)
-  }
-
-  function exportReport() {
-    const report = `VERDANT / BUSINESS HEALTH BRIEF\n\nHealth score: 82 / 100\nRevenue: $238,000 (+10.2%)\nGross margin: 38.4% (-1.8 pts)\n\nKey finding\nFulfillment costs grew 18% while revenue grew 11%.\n\nRecommended action\nReview West-region carrier contracts and protect repeat customers with a loyalty offer.`
-    const blob = new Blob([report], { type: 'text/plain' })
-    const link = document.createElement('a'); link.href = URL.createObjectURL(blob); link.download = 'verdant-health-brief.txt'; link.click(); URL.revokeObjectURL(link.href)
-  }
-
-  return <div className={dark ? 'app dark' : 'app'}>
-    <aside className="sidebar">
-      <div className="brand"><span>V</span><b>verdant</b></div>
-      <div className="workspace"><div className="avatar">FN</div><div><b>Field Notes</b><small>Growth workspace</small></div><ChevronRight size={16} /></div>
-      <nav>{nav.map(([Icon, item]) => <button key={item} className={active === item ? 'selected' : ''} onClick={() => setActive(item)}><Icon size={18} />{item}</button>)}</nav>
-      <div className="sidebar-foot"><button onClick={() => setActive('Settings')}><Settings size={18} />Settings</button><button onClick={() => setAnswer('Support is ready. Upload a dataset, then ask a question in the Pivot analyst panel.') }><CircleHelp size={18} />Help centre</button><div className="profile"><div className="avatar peach">AK</div><div><b>Amelia King</b><small>Owner</small></div><MoreHorizontal size={17} /></div></div>
-    </aside>
-
-    <main>
-      <header>
-        <div className="crumb"><span>{active}</span><small>Tuesday, 14 July</small></div>
-        <div className="head-actions"><button className="icon-btn" onClick={() => setDark(!dark)}>{dark ? <Sun size={18} /> : <Moon size={18} />}</button><button className="icon-btn"><Bell size={18} /><i /></button><button className="upload-btn" onClick={() => setPanel(true)}><CloudUpload size={17} />Add data</button></div>
-      </header>
-      {active !== 'Overview' ? <WorkspaceView page={active} onBack={() => setActive('Overview')} /> : <><section className="intro"><div><p className="eyebrow">YOUR BUSINESS, AT A GLANCE</p><h1>Good morning, Amelia.</h1><p className="sub">Here’s the clearest picture of your business right now.</p></div><button className="date"><CalendarDays size={16} />Last 30 days <ChevronRight size={15} /></button></section>
-
-      {upload && <section className="data-banner"><ShieldCheck size={18}/><div><b>{upload.type} is ready for analysis</b><span>{upload.rows} records · Data quality {upload.quality}/100 · {upload.issues?.length || 0} quality signals detected</span></div><button onClick={() => setActive('Explore')}>Review profile <ChevronRight size={15}/></button></section>}
-      <section className="health-row">
-        <article className="health-card"><div className="card-title"><span>Business health</span><button><MoreHorizontal size={18} /></button></div><div className="health-main"><div className="score"><svg viewBox="0 0 120 120"><circle cx="60" cy="60" r="49"/><circle className="meter" cx="60" cy="60" r="49"/></svg><div><strong>82</strong><small>/100</small></div></div><div><h2>Looking healthy</h2><p>Your growth is steady. Margin pressure is the one area worth addressing this month.</p><button className="text-btn" onClick={() => setActive('Health score')}>See score details <ChevronRight size={15} /></button></div></div><div className="pill-row"><span><b>↑</b> Growth strong</span><span><b>!</b> Margin watch</span><span><b>✓</b> Customers solid</span></div></article>
-        <article className="brief-card"><div className="card-title"><span>Executive brief</span><Sparkles size={17} /></div><h3>One minute read</h3>{notes.map((note) => <p key={note}><span>•</span>{note}</p>)}<button className="brief-link" onClick={exportReport}>Download brief <Download size={15} /></button></article>
-      </section>
-
-      <section className="stat-grid"><Stat label="Revenue" value="$238,000" change="10.2%"/><Stat label="Gross margin" value="38.4%" change="1.8 pts" down/><Stat label="Active customers" value="1,284" change="6.4%"/><Stat label="Avg. order value" value="$186" change="4.1%"/></section>
-
-      <section className="grid-main"><article className="chart-card"><div className="card-title"><div><span>Revenue trend</span><p>{formatMoney(238000)} <b>↑ 10.2%</b></p></div><button className="plain">Revenue <ChevronRight size={14} /></button></div><div className="chart"><ResponsiveContainer width="100%" height="100%"><AreaChart data={revenue} margin={{ top: 12, right: 5, bottom: 0, left: -24 }}><defs><linearGradient id="fill" x1="0" x2="0" y1="0" y2="1"><stop offset="0%" stopColor="#d77a40" stopOpacity=".28"/><stop offset="100%" stopColor="#d77a40" stopOpacity="0"/></linearGradient></defs><XAxis dataKey="month" axisLine={false} tickLine={false}/><YAxis axisLine={false} tickLine={false} tickFormatter={(v) => `$${v}k`}/><Tooltip formatter={(v) => [`$${v}k`, 'Revenue']}/><Area type="monotone" dataKey="value" stroke="#c96530" strokeWidth={2.5} fill="url(#fill)"/></AreaChart></ResponsiveContainer></div><p className="chart-note">November’s lift is led by returning customers, not discounting.</p></article>
-        <article className="segment-card"><div className="card-title"><span>Customer mix</span><button><MoreHorizontal size={18} /></button></div><div className="donut"><ResponsiveContainer width={150} height={150}><PieChart><Pie data={segments} dataKey="value" innerRadius={48} outerRadius={66} paddingAngle={3}>{segments.map((item) => <Cell key={item.name} fill={item.color}/>)}</Pie></PieChart></ResponsiveContainer><div><strong>1,284</strong><small>active customers</small></div></div><div className="legend">{segments.map((item) => <p key={item.name}><i style={{ background: item.color }}/>{item.name}<b>{item.value}%</b></p>)}</div></article>
-      </section>
-
-      <section className="insight-section"><div className="section-title"><div><p className="eyebrow">WHAT NEEDS ATTENTION</p><h2>Signals worth acting on</h2></div><button className="text-btn">View all insights <ChevronRight size={15}/></button></div><div className="finding-grid">{findings.map((item) => <article className={`finding ${item.type}`} key={item.title}><div className="finding-icon">{item.type === 'risk' ? <ShieldCheck size={18}/> : item.type === 'opportunity' ? <Sparkles size={18}/> : <Package size={18}/>}</div><small>{item.type}</small><h3>{item.title}</h3><p>{item.body}</p><button>{item.action} <ChevronRight size={15}/></button></article>)}</div></section>
-
-      <section className="bottom-grid"><article className="simulator"><div><p className="eyebrow">DECISION LAB</p><h2>Test a move before you make it.</h2><p>Adjust the levers and see the likely revenue effect.</p></div><div className="sliders">{[['Price change', 'price'], ['Marketing spend', 'marketing'], ['Supplier costs', 'costs']].map(([label, key]) => <label key={key}>{label}<b>{scenario[key] > 0 ? '+' : ''}{scenario[key]}%</b><input type="range" min="-15" max="20" value={scenario[key]} onChange={(e) => updateScenario({ ...scenario, [key]: Number(e.target.value) })}/></label>)}</div><div className="projection"><small>PROJECTED MONTHLY REVENUE</small><strong>{formatMoney(projection)}</strong><span><ArrowUpRight size={14}/> {scenarioResult?.change ?? ((projection / 238000 - 1) * 100).toFixed(1)}% from baseline</span></div></article>
-        <article className="consultant"><div className="consultant-head"><div className="bot"><Bot size={18}/></div><div><b>Pivot analyst <i className="live-dot"/></b><small>{upload?.id ? 'Grounded in your dataset · live' : 'Evidence-backed answers'}</small></div></div><p className={`answer ${busy ? 'thinking' : ''}`}>{busy ? 'Reading metadata, lineage and relevant records' : answer}</p>{busy && <div className="typing"><i/><i/><i/></div>}<div className="ask"><input value={question} onChange={(e) => setQuestion(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && ask()} placeholder="Ask about your business..."/><button onClick={ask}><Send size={16}/></button></div></article></section></>}
-    </main>
-
-    {panel && <div className="modal-backdrop" onMouseDown={() => setPanel(false)}><section className="upload-modal" onMouseDown={(e) => e.stopPropagation()}><button className="close" onClick={() => setPanel(false)}>×</button><div className="upload-mark"><CloudUpload size={26}/></div><p className="eyebrow">DATA INTAKE</p><h2>Add a business dataset</h2><p>Drop in CSV or Excel. Verdant profiles the schema, quality risks, keys and business role automatically.</p><button className="dropzone" onClick={() => fileRef.current.click()}><FileSpreadsheet size={24}/><b>{busy ? 'Profiling data…' : 'Choose CSV or Excel'}</b><span>or drag and drop it here</span></button><input ref={fileRef} type="file" accept=".csv,.xlsx,.xls,text/csv" hidden onChange={(e) => handleUpload(e.target.files?.[0])}/>{upload && <div className="upload-result"><b>{upload.name}</b><span>{upload.rows} records · quality {upload.quality}/100 · {upload.type}</span></div>}<small className="supported">Secure API profiling · Excel, CSV supported · Sheets and SQL connectors ready to add</small></section></div>}
-    {upload && <div className="toast"><ShieldCheck size={18}/><div><b>{upload.type} detected</b><span>{upload.rows} records ready for analysis</span></div><button onClick={() => setUpload(null)}>×</button></div>}
-  </div>
+  async function ask() { if (!question.trim()) return; setBusy(true); try { const r = await fetch(`${api}/api/chat`, { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({question, dataset_id:data.dataset_id, context:{profile:data}}) }); const res = await r.json(); setAnswer(res); setQuestion('') } finally { setBusy(false) } }
+  async function transform(operation) { setBusy(true); try { const r = await fetch(`${api}/api/datasets/${data.dataset_id}/transformations/${operation}/execute`, {method:'POST'}); const res = await r.json(); setMessage(res.ok ? `${operation.replace('_',' ')} completed. Your original file is still unchanged.` : 'That action could not be completed.'); } finally { setBusy(false) } }
+  async function validateSql() { const r = await fetch(`${api}/api/sql/validate`, {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({dataset_id:data.dataset_id,query:sql})}); const res = await r.json(); setMessage(res.safe ? 'Query is safe and read-only.' : res.detail || 'Query needs review.') }
+  if (!data) return <Welcome busy={busy} message={message} input={input} upload={upload}/>
+  return <div className="product"><aside><div className="brand"><span>P</span>pivot</div><button className="dataset-switch" onClick={() => {setData(null);setMessage('')}}><Database size={17}/><div><b>{data.file_name}</b><small>{data.rows.toLocaleString()} rows · {data.columns} columns</small></div><ChevronRight size={16}/></button><p className="side-label">DATASET</p><nav>{nav.map(item => <button key={item} className={page===item?'active':''} onClick={()=>setPage(item)}>{item}</button>)}</nav><div className="side-bottom"><button onClick={()=>setPage('Settings')}><Settings size={16}/>Settings</button><small>Everything in Pivot is tied to this dataset.</small></div></aside><main><header><div><p className="eyebrow">ACTIVE DATASET</p><h2>{data.file_name}</h2></div><button className="quiet" onClick={()=>{setData(null);setMessage('')}}>Change dataset</button></header>{message && <div className="notice"><CheckCircle2 size={17}/>{message}</div>}<Page page={page} data={data} busy={busy} question={question} setQuestion={setQuestion} ask={ask} answer={answer} transform={transform} sql={sql} setSql={setSql} validateSql={validateSql}/></main></div>
 }
 
+function Welcome({busy,message,input,upload}) { return <div className="welcome"><header className="landing-head"><div className="brand"><span>P</span>pivot</div><span>Business Intelligence with Memory</span></header><section className="hero"><p className="eyebrow">DATA INTELLIGENCE, NOT DASHBOARDS</p><h1>Understand your data<br/>before you analyze it.</h1><p>Upload a dataset. Pivot profiles it, checks its quality, records its history, and helps you make sense of what is actually there.</p><button className="primary" onClick={()=>input.current.click()}><Upload size={17}/>{busy?'Preparing dataset…':'Upload dataset'}</button><input ref={input} hidden type="file" accept=".csv,.xlsx,.xls,.json,.parquet" onChange={e=>upload(e.target.files?.[0])}/><div className="formats">CSV · Excel · JSON · Parquet</div>{message && <div className="welcome-msg">{busy?<LoaderCircle className="spin" size={18}/>:<ShieldCheck size={18}/>} {message}</div>}</section><section className="journey"><span>Upload</span><i/> <span>Profile</span><i/> <span>Quality</span><i/> <span>Understand</span><i/> <span>Decide</span></section></div> }
+
+function Page({page,data,busy,question,setQuestion,ask,answer,transform,sql,setSql,validateSql}) {
+  const issues=data.issues||[], schema=data.schema||{}, semantic=schema.semantic_columns||[]
+  if(page==='Overview') return <section className="page"><p className="eyebrow">DATASET OVERVIEW</p><h1>{data.file_name}</h1><p className="lede">This is the current source of truth. Pivot has profiled it without changing it.</p><div className="stats"><Card label="Records" value={data.rows.toLocaleString()}/><Card label="Columns" value={data.columns}/><Card label="Data quality" value={`${data.quality_score}/100`}/><Card label="Detected domain" value={data.role}/></div><div className="split"><article className="panel"><h3>What Pivot found</h3><p><b>{semantic.length}</b> fields with semantic meaning</p><p><b>{issues.length}</b> items worth reviewing</p><p><b>{schema.pii_columns?.length||0}</b> potentially sensitive fields</p></article><article className="panel"><h3>Suggested next step</h3><p>Review the profile to confirm what each column means, then resolve any quality issues you agree with.</p><button className="link">Open profile <ChevronRight size={15}/></button></article></div></section>
+  if(page==='Profile') return <section className="page"><p className="eyebrow">SCHEMA & MEANING</p><h1>Data profile</h1><p className="lede">Pivot’s best understanding of your columns. You can use this to decide what needs correction.</p><div className="table">{semantic.map(x=><div className="row" key={x.column}><b>{x.column}</b><span>{x.role.replaceAll('_',' ')}</span><span>{Math.round(x.confidence*100)}% confident</span><small>{x.evidence}</small></div>)}</div></section>
+  if(page==='Quality') return <section className="page"><p className="eyebrow">DATA QUALITY</p><h1>Quality score: {data.quality_score}/100</h1><p className="lede">These are checks, not automatic changes. Review them before you change the dataset.</p><div className="issue-list">{issues.length?issues.map(i=><article className="issue" key={i.type}><b>{i.type.replaceAll('_',' ')}</b><span>{i.count} affected values</span><p>{i.impact}</p><small>Suggested: {i.fix}</small></article>):<article className="issue"><b>No obvious quality issues found</b><p>Pivot did not detect common missing-data, duplicate, date, or outlier issues.</p></article>}</div></section>
+  if(page==='Cleaning') return <section className="page"><p className="eyebrow">REVIEW CHANGES</p><h1>Suggested cleanups</h1><p className="lede">Every action creates a separate output. Your uploaded file is never overwritten.</p><div className="cards">{[['trim_text','Trim text fields','Remove accidental spaces around text.'],['remove_duplicates','Remove exact duplicates','Create a clean copy with duplicate rows removed.'],['normalize_columns','Standardize column names','Create safer names for downstream use.'],['parse_dates','Parse date columns','Create typed date fields where safely detected.']].map(([id,name,desc])=><article className="action" key={id}><Wand2 size={19}/><h3>{name}</h3><p>{desc}</p><button className="primary small" disabled={busy} onClick={()=>transform(id)}>Create clean version</button></article>)}</div></section>
+  if(page==='Analysis') return <section className="page"><p className="eyebrow">ANALYSIS READY</p><h1>What can be analyzed</h1><p className="lede">Pivot only offers analyses supported by your dataset’s fields.</p><div className="cards">{[...schema.numeric_columns||[],...schema.date_columns||[]].map(field=><article className="action" key={field}><Sparkles size={19}/><h3>{field}</h3><p>{schema.date_columns?.includes(field)?'Time-based analysis is available.':'Numeric distributions and comparisons are available.'}</p></article>)}</div></section>
+  if(page==='AI Analyst') return <section className="page"><p className="eyebrow">GROUNDED ANALYST</p><h1>Ask about this dataset</h1><p className="lede">Answers are based on the active dataset and show when evidence is limited.</p><div className="chat"><div className="chat-head"><Bot size={18}/><b>Pivot analyst</b><span>Dataset-aware</span></div>{answer&&<div className="answer"><b>Answer</b><p>{answer.answer}</p>{answer.citations?.length>0&&<small>Sources: {answer.citations.map(x=>x.source).join(', ')}</small>}</div>}<div className="ask"><input value={question} onChange={e=>setQuestion(e.target.value)} onKeyDown={e=>e.key==='Enter'&&ask()} placeholder="For example: What fields are available?"/><button onClick={ask} disabled={busy}>Ask</button></div></div></section>
+  if(page==='SQL') return <section className="page"><p className="eyebrow">SAFE SQL WORKSPACE</p><h1>Validate a read-only query</h1><p className="lede">Pivot blocks commands that could alter data. External database execution is not enabled in this local build.</p><textarea value={sql} onChange={e=>setSql(e.target.value)}/><button className="primary small" onClick={validateSql}>Validate query</button></section>
+  if(page==='Reports') return <section className="page"><p className="eyebrow">REPORTS</p><h1>Dataset summary</h1><p className="lede">A concise, traceable summary of this dataset is ready to export.</p><button className="primary" onClick={()=>{const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([`${data.file_name}\nRows: ${data.rows}\nColumns: ${data.columns}\nQuality: ${data.quality_score}/100`],{type:'text/plain'}));a.download='pivot-dataset-summary.txt';a.click()}}><FileText size={16}/>Download summary</button></section>
+  if(page==='Versions'||page==='Lineage') return <section className="page"><p className="eyebrow">{page.toUpperCase()}</p><h1>{page}</h1><p className="lede">The original upload is the source of truth. Every approved cleanup creates a new, separate version.</p><div className="lineage"><GitBranch size={22}/><div><b>Original source</b><small>{data.file_name} · {data.rows} records · unchanged</small></div></div></section>
+  return <section className="page"><h1>{page}</h1></section>
+}
+function Card({label,value}){return <article className="stat"><span>{label}</span><b>{value}</b></article>}
 export default App

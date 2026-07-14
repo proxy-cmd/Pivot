@@ -52,6 +52,8 @@ async def profile(file: UploadFile = File(...)):
         raise HTTPException(422, 'The uploaded file contains no records.')
     result = profile_frame(frame, file.filename)
     result['dataset_id'] = dataset_id
+    result['preview'] = json.loads(frame.head(8).fillna('').to_json(orient='records', date_format='iso'))
+    result['columns_list'] = [str(column) for column in frame.columns]
     result['recommendations'] = [{'operation': 'trim_text', 'label': 'Trim whitespace', 'reason': 'Safe cleanup for text fields; requires approval.'}, {'operation': 'remove_duplicates', 'label': 'Remove exact duplicates', 'reason': 'Preserves source and creates a reversible version.'}, {'operation': 'normalize_columns', 'label': 'Normalize column names', 'reason': 'Improves reliable downstream mapping.'}]
     context = [f"Dataset: {file.filename}", f"Role: {result['role']}", f"Rows: {result['rows']}", f"Columns: {', '.join(frame.columns.astype(str).tolist())}", frame.head(25).to_csv(index=False)]
     add_chunks(dataset_id, file.filename, context + extract(file.filename, data))

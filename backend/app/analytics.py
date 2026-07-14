@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import hashlib
 from dataclasses import dataclass
 from typing import Any
 
@@ -42,6 +43,19 @@ def profile_frame(frame: pd.DataFrame, filename: str) -> dict[str, Any]:
     numeric = frame.select_dtypes(include=np.number).columns.tolist()
     money = [column for column in frame.columns if any(word in column for word in MONEY_WORDS)]
     ids = [column for column in frame.columns if column.endswith('_id') or any(word in column for word in ID_WORDS)]
+    pii = [column for column in frame.columns if any(word in column for word in ('email', 'phone', 'address', 'ssn', 'dob', 'first_name', 'last_name'))]
+    categoricals = frame.select_dtypes(include=['object', 'category']).columns.tolist()
+    whitespace = sum(int(frame[column].astype(str).str.contains(r'^\s+|\s+$', regex=True, na=False).sum()) for column in categoricals)
+    semantic = []
+    for column in frame.columns:
+        kind = 'dimension'; confidence = 0.62
+        name = column.lower()
+        if column in ids: kind, confidence = 'identifier', 0.93
+        elif column in money: kind, confidence = 'monetary_metric', 0.88
+        elif column in date_cols: kind, confidence = 'time_dimension', 0.86
+        elif any(word in name for word in ('region', 'country', 'city', 'state', 'zip')): kind, confidence = 'geographic_dimension', 0.81
+        elif column in numeric: kind, confidence = 'numeric_metric', 0.76
+        semantic.append({'column': column, 'role': kind, 'confidence': confidence, 'evidence': f'Name and values match {kind.replace("_", " ")} patterns.'})
     invalid_dates = 0
     for column in date_cols:
         parsed = pd.to_datetime(frame[column], errors='coerce')
@@ -66,13 +80,17 @@ def profile_frame(frame: pd.DataFrame, filename: str) -> dict[str, Any]:
         issues.append({'type': 'negative_values', 'count': negatives, 'impact': 'Negative operational values may represent returns or entry errors.', 'fix': 'Classify returns separately and validate remaining values.'})
     if outliers:
         issues.append({'type': 'outliers', 'count': outliers, 'impact': 'Extreme records can skew averages and forecasts.', 'fix': 'Review flagged values before excluding them.'})
+    if whitespace:
+        issues.append({'type': 'whitespace', 'count': whitespace, 'impact': 'Leading or trailing whitespace creates duplicate categories.', 'fix': 'Review and approve text trimming.'})
     penalty = min(55, (missing / total) * 100 + (duplicates / max(rows, 1)) * 30 + invalid_dates * 1.5 + negatives * 0.5 + outliers * 0.4)
     keys = [column for column in ids if frame[column].nunique(dropna=True) == rows]
     return {
         'file_name': filename, 'role': role_for(frame.columns.tolist()), 'rows': rows, 'columns': cols,
+        'fingerprint': hashlib.sha256(frame.to_csv(index=False).encode()).hexdigest(),
         'quality_score': max(45, round(100 - penalty)), 'issues': issues, 'schema': {
             'date_columns': date_cols, 'numeric_columns': numeric, 'currency_columns': money,
             'candidate_primary_keys': keys, 'candidate_ids': ids,
+            'pii_columns': pii, 'semantic_columns': semantic,
         },
     }
 

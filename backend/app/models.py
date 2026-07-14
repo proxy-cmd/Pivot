@@ -13,6 +13,11 @@ class TransformRequest(BaseModel):
     note: str = Field(default='', max_length=500)
 
 
+class SqlRequest(BaseModel):
+    dataset_id: str
+    query: str = Field(min_length=8, max_length=5000)
+
+
 class ScenarioRequest(BaseModel):
     price_change: float = Field(default=0, ge=-50, le=100)
     marketing_change: float = Field(default=0, ge=-50, le=200)

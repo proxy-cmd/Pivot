@@ -9,3 +9,4 @@ google-genai==1.0.0
 pydantic-settings==2.7.1
 pypdf==5.1.0
 pyarrow==18.1.0
+pytest==8.3.4

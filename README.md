@@ -6,9 +6,12 @@ Pivot is a metadata-driven data engineering and analytics workspace. It is desig
 
 - **Dataset sessions:** CSV, Excel, JSON and Parquet uploads are stored unchanged as the source of truth.
 - **Profiling and semantic hints:** column types, missing data, candidate keys, dates, numeric and money fields, and probable business role are inferred automatically.
+- **Trust signals:** dataset fingerprints, PII flags, whitespace checks and per-column semantic confidence/evidence are captured alongside the profile.
 - **Quality engine:** missing values, duplicates, invalid dates, suspicious negative values and statistical outliers are identified with business impact and proposed fixes.
 - **Metadata and lineage:** each dataset has a persistent profile, event history and versioned transformation plan. Nothing is changed automatically.
 - **Safe transformation planning:** trim text, de-duplicate, normalize names and parse-date actions are recorded as approval-required lineage entries.
+- **Reproducible execution:** approved deterministic transformations can produce a separate version output while keeping the original file unchanged.
+- **SQL guardrail:** the API accepts only validated read-only `SELECT`/`WITH` SQL; all mutation, schema and multi-statement operations are rejected.
 - **RAG assistant:** uploaded dataset samples and PDF/JSON document chunks are indexed locally with TF-IDF retrieval. The chat endpoint retrieves relevant context before answering. With Gemini configured, answers are generated from that retrieved context and include source citations.
 - **Analytics:** business-health score, KPI trends, anomaly signals, forecasts with confidence bounds, and a scenario simulator powered by the Python API.
 - **Live experience:** the UI shows a live grounded-chat state and the API exposes server-sent analysis events for real-time clients.
@@ -60,3 +63,11 @@ This creates one production container on port 8000. In a real deployment, use ma
 ## Product direction
 
 Pivot is intentionally built in layers: deterministic data engineering first, metadata and lineage next, then retrieval-grounded AI orchestration. That makes it a credible foundation for safe natural-language analysis, source connectors, validated read-only SQL, reusable workflows, scheduled reports, and multi-user collaboration—not another disposable dashboard.
+
+## Verification
+
+The repository includes focused tests for forecasting intervals, scenario directionality, local retrieval and SQL safety. Run them with:
+
+```powershell
+pytest backend/tests
+```

@@ -29,6 +29,8 @@ def event(dataset_id: str, kind: str, message: str):
 
 
 def create_dataset(name: str, suffix: str, raw: bytes) -> str:
+    ROOT.mkdir(exist_ok=True)
+    FILES.mkdir(exist_ok=True)
     dataset_id = uuid4().hex
     path = FILES / f'{dataset_id}{suffix}'
     path.write_bytes(raw)

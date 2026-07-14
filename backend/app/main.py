@@ -12,8 +12,10 @@ from fastapi.responses import StreamingResponse
 from .analytics import forecast, profile_frame, scenario
 from .config import get_settings
 from .models import ChatRequest, ScenarioRequest
-from .models import TransformRequest
+from .models import SqlRequest, TransformRequest
+from .pipeline import apply
 from .rag import extract, retrieve
+from .security import validate_readonly_sql
 from .store import add_chunks, add_version, chunks_for, create_dataset, events_for, finish_dataset, get_dataset
 
 app = FastAPI(title='Verdant Analytics API', version='1.0.0')
@@ -88,6 +90,35 @@ def plan_transformation(dataset_id: str, body: TransformRequest):
     if not get_dataset(dataset_id): raise HTTPException(404, 'Dataset session not found.')
     add_version(dataset_id, body.operation, body.note or 'Awaiting explicit user approval before any source data is changed.')
     return {'ok': True, 'message': 'Transformation plan recorded in lineage. Source data remains unchanged.'}
+
+
+@app.post('/api/datasets/{dataset_id}/transformations/{operation}/execute')
+def execute_transformation(dataset_id: str, operation: str):
+    item = get_dataset(dataset_id)
+    if not item: raise HTTPException(404, 'Dataset session not found.')
+    import pandas as pd
+    path = Path(item['source_path'])
+    try:
+        if path.suffix.lower() in ('.xlsx', '.xls'): frame = pd.read_excel(path)
+        elif path.suffix.lower() == '.json': frame = pd.read_json(path)
+        elif path.suffix.lower() == '.parquet': frame = pd.read_parquet(path)
+        else: frame = pd.read_csv(path)
+        clean, metrics = apply(frame.copy(), operation)
+    except ValueError as error:
+        raise HTTPException(422, str(error)) from error
+    version_file = path.with_name(f'{dataset_id}_{len(item["versions"])}.csv')
+    clean.to_csv(version_file, index=False)
+    add_version(dataset_id, f'executed:{operation}', json.dumps({'output': str(version_file), **metrics}))
+    return {'ok': True, 'rows_before': len(frame), 'rows_after': len(clean), 'metrics': metrics, 'output': str(version_file), 'source_unchanged': True}
+
+
+@app.post('/api/sql/validate')
+def validate_sql(body: SqlRequest):
+    item = get_dataset(body.dataset_id)
+    if not item: raise HTTPException(404, 'Dataset session not found.')
+    try: query = validate_readonly_sql(body.query)
+    except ValueError as error: raise HTTPException(422, str(error)) from error
+    return {'safe': True, 'query': query, 'explanation': 'Read-only query accepted. Execution against external databases is connector-gated.'}
 
 
 @app.post('/api/forecast')

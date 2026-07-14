@@ -4,7 +4,7 @@
   "version": "1.0.0",
   "type": "module",
   "scripts": {
-    "dev": "vite",
+    "dev": "concurrently -k \"npm:api\" \"vite\"",
     "api": "python -m uvicorn backend.app.main:app --reload --port 8000",
     "build": "vite build",
     "preview": "vite preview"
@@ -17,6 +17,7 @@
     "react-dom": "latest"
   },
   "devDependencies": {
+    "concurrently": "^9.2.1",
     "vite": "latest"
   }
 }

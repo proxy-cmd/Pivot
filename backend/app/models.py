@@ -18,8 +18,23 @@ class SqlRequest(BaseModel):
     query: str = Field(min_length=8, max_length=5000)
 
 
+class SqlAskRequest(BaseModel):
+    dataset_id: str
+    question: str = Field(min_length=4, max_length=1000)
+
+
 class ScenarioRequest(BaseModel):
     price_change: float = Field(default=0, ge=-50, le=100)
     marketing_change: float = Field(default=0, ge=-50, le=200)
     cost_change: float = Field(default=0, ge=-50, le=100)
-    baseline_revenue: float = Field(default=238000, gt=0)
+    baseline_revenue: float = Field(gt=0)
+
+
+class AnalysisRequest(BaseModel):
+    kind: str = Field(pattern='^(trend|distribution|breakdown|quality)$')
+    column: str | None = Field(default=None, max_length=200)
+
+
+class ReportRequest(BaseModel):
+    title: str = Field(default='Pivot report', min_length=1, max_length=120)
+    format: str = Field(default='md', pattern='^(md|html|json)$')

@@ -7,16 +7,25 @@ def apply(frame: pd.DataFrame, operation: str) -> tuple[pd.DataFrame, dict]:
     before = len(frame)
     if operation == 'trim_text':
         columns = frame.select_dtypes(include='object').columns.tolist()
+        affected = 0
         for column in columns:
+            original = frame[column].copy()
             frame[column] = frame[column].map(lambda value: value.strip() if isinstance(value, str) else value)
-        return frame, {'columns': columns, 'affected_rows': before}
+            affected += int((original != frame[column]).fillna(False).sum())
+        return frame, {'columns': columns, 'affected_rows': affected}
     if operation == 'remove_duplicates':
         frame = frame.drop_duplicates().copy()
         return frame, {'removed_rows': before - len(frame), 'affected_rows': before - len(frame)}
     if operation == 'normalize_columns':
         old = frame.columns.tolist()
-        frame.columns = [str(column).strip().lower().replace(' ', '_') for column in frame.columns]
-        return frame, {'renamed': dict(zip(old, frame.columns)), 'affected_rows': 0}
+        names = []
+        seen = {}
+        for column in old:
+            base = str(column).strip().lower().replace(' ', '_') or 'column'
+            seen[base] = seen.get(base, 0) + 1
+            names.append(base if seen[base] == 1 else f'{base}_{seen[base]}')
+        frame.columns = names
+        return frame, {'renamed': dict(zip(old, frame.columns)), 'affected_rows': int(old != names)}
     if operation == 'parse_dates':
         changed = []
         for column in frame.columns:

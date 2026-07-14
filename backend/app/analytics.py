@@ -20,6 +20,31 @@ def clean_name(name: str) -> str:
     return re.sub(r'[^a-z0-9]+', '_', str(name).lower()).strip('_')
 
 
+def normalize_columns(columns: list[str]) -> list[str]:
+    """Return stable SQL-safe names without mutating the source file."""
+    result = []
+    seen: dict[str, int] = {}
+    for raw in columns:
+        base = clean_name(raw) or 'column'
+        seen[base] = seen.get(base, 0) + 1
+        result.append(base if seen[base] == 1 else f'{base}_{seen[base]}')
+    return result
+
+
+def prepare_frame(frame: pd.DataFrame) -> pd.DataFrame:
+    prepared = frame.copy()
+    prepared.columns = normalize_columns([str(column) for column in prepared.columns])
+    return prepared
+
+
+def _numeric_series(frame: pd.DataFrame, column: str) -> pd.Series:
+    values = frame[column]
+    if pd.api.types.is_numeric_dtype(values):
+        return pd.to_numeric(values, errors='coerce')
+    cleaned = values.astype('string').str.replace(r'[^0-9.\-]', '', regex=True)
+    return pd.to_numeric(cleaned, errors='coerce')
+
+
 def role_for(columns: list[str]) -> str:
     text = ' '.join(columns).lower()
     if any(word in text for word in ('order', 'revenue', 'sale', 'transaction')):
@@ -34,19 +59,31 @@ def role_for(columns: list[str]) -> str:
 
 
 def profile_frame(frame: pd.DataFrame, filename: str) -> dict[str, Any]:
-    frame.columns = [clean_name(column) for column in frame.columns]
+    frame = prepare_frame(frame)
     rows, cols = frame.shape
     missing = int(frame.isna().sum().sum())
     duplicates = int(frame.duplicated().sum())
     total = max(rows * max(cols, 1), 1)
-    date_cols = [column for column in frame.columns if any(word in column for word in DATE_WORDS)]
-    numeric = frame.select_dtypes(include=np.number).columns.tolist()
-    money = [column for column in frame.columns if any(word in column for word in MONEY_WORDS)]
+    date_cols = []
+    for column in frame.columns:
+        if any(word in column for word in DATE_WORDS):
+            parsed = pd.to_datetime(frame[column], errors='coerce')
+            if parsed.notna().sum() >= max(2, int(frame[column].notna().sum() * 0.2)):
+                date_cols.append(column)
     ids = [column for column in frame.columns if column.endswith('_id') or any(word in column for word in ID_WORDS)]
+    numeric = []
+    for column in frame.columns:
+        if column in ids or column in date_cols:
+            continue
+        non_null_numeric = int(_numeric_series(frame, column).notna().sum())
+        if pd.api.types.is_numeric_dtype(frame[column]) or (non_null_numeric >= 2 and non_null_numeric >= int(frame[column].notna().sum() * 0.8)):
+            numeric.append(column)
+    money = [column for column in frame.columns if any(word in column for word in MONEY_WORDS)]
     pii = [column for column in frame.columns if any(word in column for word in ('email', 'phone', 'address', 'ssn', 'dob', 'first_name', 'last_name'))]
-    categoricals = frame.select_dtypes(include=['object', 'category']).columns.tolist()
+    categoricals = [column for column in frame.columns if column not in numeric and column not in date_cols]
     whitespace = sum(int(frame[column].astype(str).str.contains(r'^\s+|\s+$', regex=True, na=False).sum()) for column in categoricals)
     semantic = []
+    column_stats = []
     for column in frame.columns:
         kind = 'dimension'; confidence = 0.62
         name = column.lower()
@@ -55,18 +92,43 @@ def profile_frame(frame: pd.DataFrame, filename: str) -> dict[str, Any]:
         elif column in date_cols: kind, confidence = 'time_dimension', 0.86
         elif any(word in name for word in ('region', 'country', 'city', 'state', 'zip')): kind, confidence = 'geographic_dimension', 0.81
         elif column in numeric: kind, confidence = 'numeric_metric', 0.76
+        values = frame[column]
+        numeric_values = _numeric_series(frame, column) if column in numeric else pd.Series(dtype=float)
+        non_null = values.dropna()
+        examples = [str(value) for value in non_null.head(3).tolist()]
+        stats: dict[str, Any] = {
+            'column': column,
+            'dtype': str(values.dtype),
+            'role': kind,
+            'confidence': confidence,
+            'null_count': int(values.isna().sum()),
+            'null_pct': round(float(values.isna().mean() * 100), 2),
+            'unique_count': int(values.nunique(dropna=True)),
+            'unique_pct': round(float(values.nunique(dropna=True) / max(rows, 1) * 100), 2),
+            'examples': examples,
+        }
+        if column in numeric:
+            clean_numeric = numeric_values.dropna()
+            stats.update({
+                'min': float(clean_numeric.min()) if len(clean_numeric) else None,
+                'max': float(clean_numeric.max()) if len(clean_numeric) else None,
+                'mean': round(float(clean_numeric.mean()), 4) if len(clean_numeric) else None,
+                'median': round(float(clean_numeric.median()), 4) if len(clean_numeric) else None,
+            })
         semantic.append({'column': column, 'role': kind, 'confidence': confidence, 'evidence': f'Name and values match {kind.replace("_", " ")} patterns.'})
+        column_stats.append(stats)
     invalid_dates = 0
     for column in date_cols:
         parsed = pd.to_datetime(frame[column], errors='coerce')
         invalid_dates += int(parsed.isna().sum() - frame[column].isna().sum())
     negatives = 0
     for column in numeric:
+        numeric_values = _numeric_series(frame, column)
         if any(word in column for word in ('quantity', 'units', 'stock', 'price', 'amount', 'cost')):
-            negatives += int((frame[column] < 0).sum())
+            negatives += int((numeric_values < 0).sum())
     outliers = 0
     if rows >= 12 and numeric:
-        sample = frame[numeric].replace([np.inf, -np.inf], np.nan).dropna()
+        sample = pd.DataFrame({column: _numeric_series(frame, column) for column in numeric}).replace([np.inf, -np.inf], np.nan).dropna()
         if len(sample) >= 12:
             outliers = int((IsolationForest(contamination=0.05, random_state=42).fit_predict(sample) == -1).sum())
     issues = []
@@ -84,14 +146,18 @@ def profile_frame(frame: pd.DataFrame, filename: str) -> dict[str, Any]:
         issues.append({'type': 'whitespace', 'count': whitespace, 'impact': 'Leading or trailing whitespace creates duplicate categories.', 'fix': 'Review and approve text trimming.'})
     penalty = min(55, (missing / total) * 100 + (duplicates / max(rows, 1)) * 30 + invalid_dates * 1.5 + negatives * 0.5 + outliers * 0.4)
     keys = [column for column in ids if frame[column].nunique(dropna=True) == rows]
+    consistency = max(0, 100 - round((invalid_dates / max(rows * max(len(date_cols), 1), 1)) * 100))
+    completeness = round(100 - (missing / total) * 100, 2)
+    uniqueness = round(100 - (duplicates / max(rows, 1)) * 100, 2)
     return {
         'file_name': filename, 'role': role_for(frame.columns.tolist()), 'rows': rows, 'columns': cols,
         'fingerprint': hashlib.sha256(frame.to_csv(index=False).encode()).hexdigest(),
         'quality_score': max(45, round(100 - penalty)), 'issues': issues, 'schema': {
             'date_columns': date_cols, 'numeric_columns': numeric, 'currency_columns': money,
             'candidate_primary_keys': keys, 'candidate_ids': ids,
-            'pii_columns': pii, 'semantic_columns': semantic,
+            'pii_columns': pii, 'semantic_columns': semantic, 'column_stats': column_stats,
         },
+        'metrics': {'completeness': completeness, 'consistency': consistency, 'uniqueness': uniqueness, 'missing_cells': missing, 'duplicate_rows': duplicates},
     }
 
 
@@ -116,5 +182,5 @@ def forecast(values: list[float]) -> dict[str, Any]:
 
 def scenario(price: float, marketing: float, costs: float, baseline: float) -> dict[str, Any]:
     revenue = baseline * (1 + (price * 0.55 + marketing * 0.28) / 100)
-    margin = 38.4 + price * 0.22 + marketing * 0.05 - costs * 0.46
-    return {'revenue': round(revenue), 'margin': round(max(0, margin), 1), 'change': round((revenue / baseline - 1) * 100, 1)}
+    cost_pressure = round(max(0, costs * 0.46), 1)
+    return {'revenue': round(revenue), 'change': round((revenue / baseline - 1) * 100, 1), 'cost_pressure': cost_pressure, 'assumption': 'Revenue change uses the supplied baseline and scenario percentages; no dataset margin is assumed.'}

@@ -5,21 +5,36 @@ import sqlite3
 from pathlib import Path
 from uuid import uuid4
 
-ROOT = Path('data')
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+ROOT = PROJECT_ROOT / 'data'
 FILES = ROOT / 'files'
 DB = ROOT / 'pivot.db'
 
 
+def absolute_path(value: str | None) -> str | None:
+    if not value:
+        return value
+    path = Path(value)
+    return str(path if path.is_absolute() else PROJECT_ROOT / path)
+
+
 def connect():
-    ROOT.mkdir(exist_ok=True); FILES.mkdir(exist_ok=True)
+    ROOT.mkdir(exist_ok=True)
+    FILES.mkdir(exist_ok=True)
     conn = sqlite3.connect(DB)
     conn.row_factory = sqlite3.Row
     conn.executescript('''
-    CREATE TABLE IF NOT EXISTS datasets (id TEXT PRIMARY KEY, name TEXT, source_path TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP, profile TEXT, status TEXT);
+    CREATE TABLE IF NOT EXISTS datasets (id TEXT PRIMARY KEY, name TEXT, source_path TEXT, active_path TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP, profile TEXT, status TEXT);
     CREATE TABLE IF NOT EXISTS versions (id TEXT PRIMARY KEY, dataset_id TEXT, number INTEGER, parent_id TEXT, operation TEXT, detail TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP);
     CREATE TABLE IF NOT EXISTS chunks (id TEXT PRIMARY KEY, dataset_id TEXT, source TEXT, content TEXT, metadata TEXT);
     CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY AUTOINCREMENT, dataset_id TEXT, kind TEXT, message TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP);
+    CREATE TABLE IF NOT EXISTS transformations (id TEXT PRIMARY KEY, dataset_id TEXT, operation TEXT, status TEXT, preview_path TEXT, metrics TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP, resolved_at TEXT);
+    CREATE TABLE IF NOT EXISTS reports (id TEXT PRIMARY KEY, dataset_id TEXT, title TEXT, format TEXT, path TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP);
     ''')
+    columns = {row['name'] for row in conn.execute('PRAGMA table_info(datasets)')}
+    if 'active_path' not in columns:
+        conn.execute('ALTER TABLE datasets ADD COLUMN active_path TEXT')
+        conn.execute('UPDATE datasets SET active_path=source_path WHERE active_path IS NULL')
     return conn
 
 
@@ -35,7 +50,7 @@ def create_dataset(name: str, suffix: str, raw: bytes) -> str:
     path = FILES / f'{dataset_id}{suffix}'
     path.write_bytes(raw)
     with connect() as db:
-        db.execute('INSERT INTO datasets(id,name,source_path,status) VALUES(?,?,?,?)', (dataset_id, name, str(path), 'processing'))
+        db.execute('INSERT INTO datasets(id,name,source_path,active_path,status) VALUES(?,?,?,?,?)', (dataset_id, name, str(path), str(path), 'processing'))
     event(dataset_id, 'ingest', 'Source file stored unchanged as version 0.')
     return dataset_id
 
@@ -52,8 +67,42 @@ def get_dataset(dataset_id: str):
     with connect() as db:
         row = db.execute('SELECT * FROM datasets WHERE id=?', (dataset_id,)).fetchone()
         if not row: return None
-        item = dict(row); item['profile'] = json.loads(item['profile']) if item['profile'] else None
+        item = dict(row); item['source_path'] = absolute_path(item.get('source_path')); item['active_path'] = absolute_path(item.get('active_path')); item['profile'] = json.loads(item['profile']) if item['profile'] else None
+        profile = item.get('profile') or {}
+        schema = profile.get('schema') or {}
+        date_words = ('date', 'time', 'month', 'year', 'created', 'ordered')
+        needs_profile_repair = bool(set(schema.get('date_columns', [])) & set(schema.get('numeric_columns', []))) or any(any(word in str(column).lower() for word in date_words) for column in schema.get('numeric_columns', []))
+        if needs_profile_repair:
+            try:
+                import pandas as pd
+                from .analytics import prepare_frame, profile_frame
+                source = Path(item['active_path'] or item['source_path'])
+                if source.suffix.lower() in {'.xlsx', '.xls'}:
+                    frame = pd.read_excel(source)
+                elif source.suffix.lower() == '.json':
+                    frame = pd.read_json(source)
+                elif source.suffix.lower() == '.parquet':
+                    frame = pd.read_parquet(source)
+                else:
+                    frame = pd.read_csv(source)
+                repaired = profile_frame(prepare_frame(frame), item['name'])
+                repaired['columns_list'] = [str(column) for column in prepare_frame(frame).columns]
+                repaired['preview'] = json.loads(prepare_frame(frame).head(8).fillna('').to_json(orient='records', date_format='iso'))
+                repaired['recommendations'] = profile.get('recommendations', [])
+                with connect() as update_db:
+                    update_db.execute('UPDATE datasets SET profile=? WHERE id=?', (json.dumps(repaired), dataset_id))
+                item['profile'] = repaired
+            except Exception:
+                pass
         item['versions'] = [dict(v) for v in db.execute('SELECT * FROM versions WHERE dataset_id=? ORDER BY number', (dataset_id,))]
+        item['active_version'] = 0
+        for version in item['versions']:
+            try:
+                if json.loads(version['detail']).get('output') == item.get('active_path'):
+                    item['active_version'] = version['number']
+            except (TypeError, json.JSONDecodeError):
+                continue
+        item['pending_transformations'] = [dict(v) for v in db.execute('SELECT * FROM transformations WHERE dataset_id=? AND status=? ORDER BY created_at DESC', (dataset_id, 'pending'))]
         return item
 
 
@@ -75,6 +124,50 @@ def events_for(dataset_id: str):
 def add_version(dataset_id: str, operation: str, detail: str):
     current = get_dataset(dataset_id)
     number = len(current['versions']) if current else 0
+    parent_id = current['versions'][-1]['id'] if current and current['versions'] else None
+    version_id = uuid4().hex
     with connect() as db:
-        db.execute('INSERT INTO versions(id,dataset_id,number,operation,detail) VALUES(?,?,?,?,?)', (uuid4().hex, dataset_id, number, operation, detail))
-    event(dataset_id, 'lineage', f'Proposed transformation recorded: {operation}.')
+        db.execute('INSERT INTO versions(id,dataset_id,number,parent_id,operation,detail) VALUES(?,?,?,?,?,?)', (version_id, dataset_id, number, parent_id, operation, detail))
+    event(dataset_id, 'lineage', f'Version {number} created: {operation}.')
+    return version_id
+
+
+def activate_dataset_version(dataset_id: str, path: str, profile: dict):
+    with connect() as db:
+        db.execute('UPDATE datasets SET active_path=?, profile=?, status=? WHERE id=?', (path, json.dumps(profile), 'ready', dataset_id))
+
+
+def create_transformation(dataset_id: str, operation: str, preview_path: str, metrics: dict) -> str:
+    transformation_id = uuid4().hex
+    with connect() as db:
+        db.execute('INSERT INTO transformations(id,dataset_id,operation,status,preview_path,metrics) VALUES(?,?,?,?,?,?)', (transformation_id, dataset_id, operation, 'pending', preview_path, json.dumps(metrics)))
+    event(dataset_id, 'cleaning', f'Preview created for {operation}; awaiting approval.')
+    return transformation_id
+
+
+def get_transformation(transformation_id: str):
+    with connect() as db:
+        row = db.execute('SELECT * FROM transformations WHERE id=?', (transformation_id,)).fetchone()
+        if not row:
+            return None
+        item = dict(row)
+        item['metrics'] = json.loads(item['metrics'] or '{}')
+        return item
+
+
+def resolve_transformation(transformation_id: str, status: str):
+    with connect() as db:
+        db.execute('UPDATE transformations SET status=?, resolved_at=CURRENT_TIMESTAMP WHERE id=?', (status, transformation_id))
+
+
+def add_report(dataset_id: str, title: str, format: str, path: str):
+    report_id = uuid4().hex
+    with connect() as db:
+        db.execute('INSERT INTO reports(id,dataset_id,title,format,path) VALUES(?,?,?,?,?)', (report_id, dataset_id, title, format, path))
+    event(dataset_id, 'report', f'Report exported: {title} ({format}).')
+    return report_id
+
+
+def reports_for(dataset_id: str):
+    with connect() as db:
+        return [dict(row) for row in db.execute('SELECT * FROM reports WHERE dataset_id=? ORDER BY created_at DESC', (dataset_id,))]

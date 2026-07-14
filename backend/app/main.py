@@ -88,10 +88,11 @@ def _profile_payload(frame: pd.DataFrame, filename: str, dataset_id: str) -> dic
     result['preview'] = json.loads(frame.head(8).fillna('').to_json(orient='records', date_format='iso'))
     result['columns_list'] = [str(column) for column in frame.columns]
     issue_operations = {
-        'missing_values': ('parse_dates', 'Parse detected date fields'),
+        'missing_values': ('fill_missing', 'Fill missing values'),
         'duplicate_records': ('remove_duplicates', 'Remove exact duplicates'),
         'whitespace': ('trim_text', 'Trim text fields'),
         'invalid_dates': ('parse_dates', 'Parse detected date fields'),
+        'outliers': ('remove_outliers', 'Review numeric outliers'),
     }
     recommendations = []
     for issue in result.get('issues', []):
@@ -153,11 +154,58 @@ def _execute_frame(frame: pd.DataFrame, query: str) -> dict[str, Any]:
     import sqlite3
     db = sqlite3.connect(':memory:')
     try:
-        frame.to_sql('dataset', db, index=False, if_exists='replace')
+        sql_frame = frame.copy()
+        for column in sql_frame.select_dtypes(include=['object', 'string']).columns:
+            if any(word in str(column).lower() for word in ('date', 'time', 'month', 'year')):
+                parsed = pd.to_datetime(sql_frame[column], format='mixed', errors='coerce')
+                if parsed.notna().mean() >= 0.2:
+                    sql_frame[column] = parsed.dt.strftime('%Y-%m-%d')
+        sql_frame.to_sql('dataset', db, index=False, if_exists='replace')
         result = pd.read_sql_query(query, db)
         return {'columns': result.columns.tolist(), 'rows': json.loads(result.head(200).fillna('').to_json(orient='records')), 'count': int(len(result))}
     finally:
         db.close()
+
+
+def _analysis_summary(kind: str, column: str | None, result: dict[str, Any], profile: dict[str, Any]) -> dict[str, Any]:
+    rows = result.get('rows') or []
+    schema = profile.get('schema', {})
+    metric_name = column or (schema.get('numeric_columns') or ['value'])[0]
+    if kind == 'trend' and rows:
+        values = [float(row.get('value', 0) or 0) for row in rows]
+        peak = rows[values.index(max(values))]
+        low = rows[values.index(min(values))]
+        return {'metric': metric_name, 'aggregation': 'monthly sum', 'periods': len(rows), 'total': round(sum(values), 2), 'average': round(sum(values) / len(values), 2), 'highest_period': {'period': peak.get('period') or peak.get('label'), 'value': round(max(values), 2)}, 'lowest_period': {'period': low.get('period') or low.get('label'), 'value': round(min(values), 2)}}
+    if kind == 'distribution':
+        metrics = result.get('metrics') or {}
+        return {'metric': metric_name, 'aggregation': 'distribution', **metrics}
+    if kind == 'breakdown' and rows:
+        first = rows[0]
+        label_key = 'dimension' if 'dimension' in first else 'label'
+        value_key = 'value'
+        return {'field': metric_name, 'aggregation': 'row count', 'groups': len(rows), 'top_group': {'value': first.get(label_key), 'count': first.get(value_key)}}
+    return {}
+
+
+def _chat_summary(question: str, item: dict, query_result: dict[str, Any], query: str | None) -> str:
+    profile = item.get('profile') or {}
+    rows = query_result.get('rows') or []
+    lower = question.lower()
+    if any(word in lower for word in ('who are you', 'what are you', 'your name', 'what can you do')):
+        return f"I’m Pivot Analyst, your evidence-backed data analyst. I’m connected to {item['name']} with {profile.get('rows', 0):,} rows and {profile.get('columns', 0)} detected fields. I can investigate trends, highest values, quality issues, and group comparisons by running read-only evidence queries."
+    if not rows:
+        return f"I’m connected to {item['name']}, but I couldn’t find enough evidence for that question in the current source. Try naming a field such as {', '.join((profile.get('columns_list') or [])[:4])}."
+    first = rows[0]
+    if any(word in lower for word in ('highest', 'top', 'most', 'best')) and 'dimension' in first:
+        return f"The highest grouped value is {first.get('dimension')} at {float(first.get('value', 0)):,.2f} for the selected metric. I grouped by the detected field and ordered the evidence descending."
+    if ('trend' in lower or 'month' in lower or 'time' in lower) and 'period' in first:
+        values = [float(row.get('value', 0) or 0) for row in rows]
+        peak = rows[values.index(max(values))]
+        return f"The {query_result.get('count', len(rows))}-period trend totals {sum(values):,.2f}, averaging {sum(values) / len(values):,.2f} per period. The highest period is {peak.get('period')} at {max(values):,.2f}."
+    if 'value' in first and len(first) == 1:
+        return f"The evidence result is {float(first['value']):,.2f}. This was calculated directly from the detected numeric field using a read-only query."
+    fields = ', '.join(query_result.get('columns') or first.keys())
+    return f"I found {query_result.get('count', len(rows)):,} evidence rows with fields {fields}. The first result is shown below so you can inspect the exact values returned by the query."
 
 
 def _deterministic_sql(question: str, item: dict) -> str | None:
@@ -265,15 +313,21 @@ def run_analysis(dataset_id: str, body: AnalysisRequest):
         if values.empty:
             raise HTTPException(422, 'This field does not contain usable numeric values.')
         histogram = pd.cut(values, bins=min(10, max(2, values.nunique())), duplicates='drop').value_counts().sort_index()
-        return {'kind': body.kind, 'title': f'Distribution of {column}', 'metrics': {'count': int(values.size), 'min': float(values.min()), 'max': float(values.max()), 'mean': float(values.mean()), 'median': float(values.median())}, 'chart': [{'label': str(label), 'value': int(value)} for label, value in histogram.items()]}
+        chart = [{'label': str(label), 'value': int(value)} for label, value in histogram.items()]
+        metrics = {'count': int(values.size), 'min': round(float(values.min()), 2), 'max': round(float(values.max()), 2), 'mean': round(float(values.mean()), 2), 'median': round(float(values.median()), 2)}
+        return {'kind': body.kind, 'title': f'Distribution of {column}', 'field': column, 'aggregation': 'value frequency', 'metrics': metrics, 'columns': ['range', 'count'], 'chart': chart}
     if body.kind == 'breakdown':
         counts = frame[column].fillna('(blank)').astype(str).value_counts().head(25)
-        return {'kind': body.kind, 'title': f'Breakdown by {column}', 'chart': [{'label': str(label), 'value': int(value)} for label, value in counts.items()]}
+        chart = [{'label': str(label), 'value': int(value)} for label, value in counts.items()]
+        return {'kind': body.kind, 'title': f'Breakdown by {column}', 'field': column, 'aggregation': 'row count', 'metrics': {'groups': len(chart), 'rows_in_top_groups': sum(point['value'] for point in chart)}, 'columns': [column, 'count'], 'chart': chart}
     dates = profile.get('schema', {}).get('date_columns', [])
     if not dates:
         raise HTTPException(422, 'A date field is required for a trend analysis.')
     grouped = pd.DataFrame({'period': pd.to_datetime(frame[dates[0]], errors='coerce').dt.to_period('M').astype('string'), 'value': _numeric_series(frame, column)}).dropna().groupby('period', as_index=False)['value'].sum()
-    return {'kind': body.kind, 'title': f'Trend of {column}', 'chart': [{'label': str(row['period']), 'value': round(float(row['value']), 2)} for _, row in grouped.iterrows()]}
+    chart = [{'label': str(row['period']), 'value': round(float(row['value']), 2)} for _, row in grouped.iterrows()]
+    result = {'kind': body.kind, 'title': f'Trend of {column}', 'field': column, 'aggregation': 'monthly sum', 'columns': ['period', column], 'chart': chart}
+    result['metrics'] = _analysis_summary(body.kind, column, {'rows': [{'period': point['label'], 'value': point['value']} for point in chart]}, profile)
+    return result
 
 
 @app.get('/api/datasets/{dataset_id}/events')
@@ -300,7 +354,7 @@ def plan_transformation(dataset_id: str, body: TransformRequest):
 @app.post('/api/datasets/{dataset_id}/transformations/{operation}/preview')
 def preview_transformation(dataset_id: str, operation: str):
     item = _dataset_or_404(dataset_id)
-    if operation not in {'trim_text', 'remove_duplicates', 'normalize_columns', 'parse_dates'}:
+    if operation not in {'trim_text', 'remove_duplicates', 'normalize_columns', 'parse_dates', 'fill_missing', 'remove_outliers'}:
         raise HTTPException(422, 'Unsupported transformation.')
     source = _read_source(item)
     try:
@@ -312,7 +366,9 @@ def preview_transformation(dataset_id: str, operation: str):
     transformation = get_transformation(transformation_id)
     preview_path = Path(transformation['preview_path'])
     preview_path.write_text(clean.to_csv(index=False), encoding='utf-8')
-    return {'id': transformation_id, 'operation': operation, 'metrics': metrics, 'rows_before': len(source), 'rows_after': len(clean), 'before_preview': json.loads(source.head(8).fillna('').to_json(orient='records')), 'after_preview': json.loads(clean.head(8).fillna('').to_json(orient='records')), 'source_unchanged': True}
+    before_preview = json.loads(source.head(8).fillna('').to_json(orient='records'))
+    after_preview = json.loads(clean.head(8).fillna('').to_json(orient='records'))
+    return {'id': transformation_id, 'operation': operation, 'metrics': metrics, 'rows_before': len(source), 'rows_after': len(clean), 'before': {'rows': len(source), 'columns': [str(column) for column in source.columns], 'preview': before_preview}, 'after': {'rows': len(clean), 'columns': [str(column) for column in clean.columns], 'preview': after_preview}, 'before_preview': before_preview, 'after_preview': after_preview, 'source_unchanged': True}
 
 
 @app.post('/api/datasets/{dataset_id}/transformations/{transformation_id}/approve')
@@ -459,6 +515,9 @@ def chat(body: ChatRequest):
         return {'answer': 'Upload a dataset before asking the analyst to investigate.', 'source': 'guardrail', 'citations': []}
     item = _dataset_or_404(body.dataset_id)
     profile = item.get('profile') or {}
+    lower_question = body.question.strip().lower()
+    if any(phrase in lower_question for phrase in ('who are you', 'what are you', 'your name', 'what can you do')):
+        return {'answer': f"I’m Pivot Analyst, your evidence-backed data analyst. I’m connected to {item['name']} with {profile.get('rows', 0):,} rows and {profile.get('columns', 0)} detected fields. I can investigate trends, highest values, quality issues, and group comparisons by running read-only evidence queries.", 'source': 'pivot-analyst', 'sql': None, 'query_result': None, 'citations': [{'source': item['name'], 'score': 1.0}]}
     if body.question.strip().lower() in {'hi', 'hello', 'hey', 'hiya', 'good morning', 'good afternoon', 'good evening'}:
         return {'answer': f"Hi — I’m connected to {item['name']}. I found {profile.get('rows', 0)} rows and {profile.get('columns', 0)} detected fields. Ask me about trends, quality, categories, or values and I’ll investigate the source.", 'source': 'dataset-aware', 'sql': None, 'citations': [{'source': item['name'], 'score': 1.0}]}
     retrieved = retrieve(body.question, chunks_for(body.dataset_id))
@@ -474,6 +533,21 @@ def chat(body: ChatRequest):
     sources = [{'source': item['name'], 'score': 1.0}]
     sources.extend({'source': value['source'], 'score': value['score']} for value in retrieved)
     context = json.dumps(evidence, default=str)[:16000]
+    if query and evidence.get('query_result'):
+        query_result = evidence['query_result']
+        rows = query_result.get('rows') or []
+        if any(word in lower_question for word in ('highest', 'top', 'most', 'best')) and rows and 'dimension' in rows[0]:
+            first = rows[0]
+            answer = f"The highest grouped value is {first.get('dimension')} at {float(first.get('value', 0)):,.2f} for the selected metric. I grouped by the detected field and ordered the evidence descending."
+        elif ('trend' in lower_question or 'month' in lower_question or 'time' in lower_question) and rows and 'value' in rows[0]:
+            values = [float(row.get('value', 0) or 0) for row in rows]
+            peak = max(rows, key=lambda row: float(row.get('value', 0) or 0))
+            answer = f"The {len(rows)}-period trend totals {sum(values):,.2f}, averaging {sum(values) / len(values):,.2f} per period. The highest period is {peak.get('period') or peak.get('label')} at {max(values):,.2f}."
+        elif rows and 'value' in rows[0] and len(rows[0]) == 1:
+            answer = f"The evidence result is {float(rows[0]['value']):,.2f}. This was calculated directly from the detected numeric field using a read-only query."
+        else:
+            answer = f"I found {query_result.get('count', len(rows)):,} evidence rows with fields {', '.join(query_result.get('columns') or rows[0].keys())}. The exact returned records are shown below."
+        return {'answer': answer, 'source': 'evidence-query', 'sql': query, 'query_result': query_result, 'citations': sources}
     if settings.gemini_api_key:
         try:
             from google import genai
@@ -498,19 +572,35 @@ def create_report(dataset_id: str, body: ReportRequest):
     overview_data = _overview(_read_source(item), profile)
     safe_title = re.sub(r'[^a-zA-Z0-9_-]+', '-', body.title or 'pivot-report').strip('-').lower() or 'pivot-report'
     format_name = body.format.lower()
-    if format_name not in {'md', 'html', 'json'}:
-        raise HTTPException(422, 'Reports currently support Markdown, HTML, and JSON.')
+    if format_name not in {'md', 'csv', 'pdf'}:
+        raise HTTPException(422, 'Reports currently support Markdown, CSV, and PDF.')
     payload = {'dataset': item['name'], 'generated_at': pd.Timestamp.utcnow().isoformat(), 'profile': profile, 'overview': overview_data, 'versions': item['versions']}
     if format_name == 'json':
         content, media_type, suffix = json.dumps(payload, indent=2, default=str), 'application/json', 'json'
     else:
         markdown = f"# {body.title or 'Pivot report'}\n\nDataset: **{item['name']}**\n\n## Profile\n\n- Rows: {profile.get('rows', 0)}\n- Columns: {profile.get('columns', 0)}\n- Quality score: {profile.get('quality_score', 0)}/100\n\n## Detected issues\n\n" + '\n'.join(f"- {issue['type']}: {issue['count']} affected rows — {issue['impact']}" for issue in profile.get('issues', []))
-        if format_name == 'html':
+        if format_name == 'csv':
+            rows = [{'field': 'dataset', 'value': item['name']}, {'field': 'rows', 'value': profile.get('rows', 0)}, {'field': 'columns', 'value': profile.get('columns', 0)}, {'field': 'quality_score', 'value': profile.get('quality_score', 0)}]
+            content, media_type, suffix = pd.DataFrame(rows).to_csv(index=False), 'text/csv', 'csv'
+        elif format_name == 'pdf':
+            lines = markdown.replace('**', '').splitlines()
+            escape = lambda value: str(value).encode('latin-1', 'replace').decode('latin-1').replace('\\', '\\\\').replace('(', '\\(').replace(')', '\\)')
+            nl = chr(10)
+            stream = 'BT /F1 11 Tf 48 760 Td ' + ' '.join(f'({escape(line[:115])}) Tj 0 -16 Td' for line in lines[:42]) + ' ET'
+            objects = ['<< /Type /Catalog /Pages 2 0 R >>', '<< /Type /Pages /Kids [3 0 R] /Count 1 >>', '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>', '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>', f'<< /Length {len(stream.encode("latin-1", "replace"))} >>{nl}stream{nl}{stream}{nl}endstream']
+            pdf = '%PDF-1.4' + nl; offsets = [0]
+            for index, obj in enumerate(objects, 1): offsets.append(len(pdf.encode('latin-1'))); pdf += f'{index} 0 obj{nl}{obj}{nl}endobj{nl}'
+            xref = len(pdf.encode('latin-1')); pdf += f'xref{nl}0 {len(objects)+1}{nl}0000000000 65535 f {nl}' + ''.join(f'{offset:010d} 00000 n {nl}' for offset in offsets[1:]) + f'trailer << /Size {len(objects)+1} /Root 1 0 R >>{nl}startxref{nl}{xref}{nl}%%EOF'
+            content, media_type, suffix = pdf, 'application/pdf', 'pdf'
+        elif format_name == 'html':
             content, media_type, suffix = f'<html><body><pre>{markdown}</pre></body></html>', 'text/html', 'html'
         else:
             content, media_type, suffix = markdown, 'text/markdown', 'md'
     path = FILES / f'{dataset_id}_{safe_title}.{suffix}'
-    path.write_text(content, encoding='utf-8')
+    if suffix == 'pdf':
+        path.write_bytes(content.encode('latin-1'))
+    else:
+        path.write_text(content, encoding='utf-8')
     report_id = add_report(dataset_id, body.title or 'Pivot report', format_name, str(path))
     return {'id': report_id, 'title': body.title or 'Pivot report', 'format': format_name, 'download_url': f'/api/datasets/{dataset_id}/reports/{report_id}/download'}
 

@@ -49,6 +49,8 @@ npm run dev
 
 Open `http://localhost:5173`. API documentation is available at `http://localhost:8000/docs`.
 
+For a fast demo, upload [`sample-data/retail-orders.csv`](sample-data/retail-orders.csv). It contains sales, customer, product, region and shipping fields so Pivot can demonstrate semantic profiling, quality checks and grounded chat immediately.
+
 To enable grounded Gemini answers, set `GEMINI_API_KEY` in `backend/.env`. Never put a key in a `VITE_` variable: browser environment values are public.
 
 ## Deploy
@@ -71,3 +73,5 @@ The repository includes focused tests for forecasting intervals, scenario direct
 ```powershell
 pytest backend/tests
 ```
+
+GitHub Actions runs the Python tests and production web build on every push and pull request.

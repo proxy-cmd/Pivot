@@ -7,7 +7,7 @@ from pathlib import Path
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse
 
 from .analytics import forecast, profile_frame, scenario
 from .config import get_settings
@@ -111,7 +111,7 @@ def execute_transformation(dataset_id: str, operation: str):
     version_file = path.with_name(f'{dataset_id}_{len(item["versions"])}.csv')
     clean.to_csv(version_file, index=False)
     add_version(dataset_id, f'executed:{operation}', json.dumps({'output': str(version_file), **metrics}))
-    return {'ok': True, 'rows_before': len(frame), 'rows_after': len(clean), 'metrics': metrics, 'output': str(version_file), 'source_unchanged': True}
+    return {'ok': True, 'version': len(item['versions']), 'rows_before': len(frame), 'rows_after': len(clean), 'metrics': metrics, 'output': str(version_file), 'source_unchanged': True}
 
 
 @app.post('/api/sql/validate')
@@ -121,6 +121,34 @@ def validate_sql(body: SqlRequest):
     try: query = validate_readonly_sql(body.query)
     except ValueError as error: raise HTTPException(422, str(error)) from error
     return {'safe': True, 'query': query, 'explanation': 'Read-only query accepted. Execution against external databases is connector-gated.'}
+
+
+@app.post('/api/sql/execute')
+def execute_sql(body: SqlRequest):
+    item = get_dataset(body.dataset_id)
+    if not item: raise HTTPException(404, 'Dataset session not found.')
+    try: query = validate_readonly_sql(body.query)
+    except ValueError as error: raise HTTPException(422, str(error)) from error
+    import pandas as pd
+    path = Path(item['source_path'])
+    try:
+        frame = pd.read_excel(path) if path.suffix.lower() in ('.xlsx', '.xls') else pd.read_json(path) if path.suffix.lower()=='.json' else pd.read_parquet(path) if path.suffix.lower()=='.parquet' else pd.read_csv(path)
+        import sqlite3
+        db = sqlite3.connect(':memory:'); frame.to_sql('dataset', db, index=False, if_exists='replace')
+        result = pd.read_sql_query(query, db); db.close()
+        return {'columns': result.columns.tolist(), 'rows': json.loads(result.head(200).fillna('').to_json(orient='records')), 'count': len(result)}
+    except Exception as error: raise HTTPException(422, f'Could not run this query: {error}') from error
+
+
+@app.get('/api/datasets/{dataset_id}/versions/{number}/download')
+def download_version(dataset_id: str, number: int):
+    item = get_dataset(dataset_id)
+    if not item: raise HTTPException(404, 'Dataset session not found.')
+    versions = [version for version in item['versions'] if version['number'] == number]
+    if not versions or number == 0: raise HTTPException(404, 'This version has no generated output.')
+    detail = json.loads(versions[0]['detail']); path = Path(detail['output'])
+    if not path.exists(): raise HTTPException(404, 'Generated output is unavailable.')
+    return FileResponse(path, filename=path.name, media_type='text/csv')
 
 
 @app.post('/api/forecast')
@@ -142,7 +170,7 @@ def chat(body: ChatRequest):
             from google import genai
             client = genai.Client(api_key=settings.gemini_api_key)
             prompt = f'''You are Pivot, a careful senior data analyst. Answer only from supplied context. State uncertainty clearly. Cite source names in square brackets when using retrieved context. Never claim a transformation was applied unless lineage says so.\n\nContext: {context}\n\nQuestion: {body.question}'''
-            response = client.models.generate_content(model='gemini-2.0-flash', contents=prompt)
+            response = client.models.generate_content(model=settings.gemini_model, contents=prompt)
             return {'answer': response.text, 'source': 'gemini-rag', 'citations': [{'source': item['source'], 'score': item['score']} for item in retrieved]}
         except Exception:
             pass

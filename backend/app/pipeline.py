@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import pandas as pd
 
+from .analytics import _numeric_series
+
 
 def apply(frame: pd.DataFrame, operation: str) -> tuple[pd.DataFrame, dict]:
     before = len(frame)
@@ -13,6 +15,34 @@ def apply(frame: pd.DataFrame, operation: str) -> tuple[pd.DataFrame, dict]:
             frame[column] = frame[column].map(lambda value: value.strip() if isinstance(value, str) else value)
             affected += int((original != frame[column]).fillna(False).sum())
         return frame, {'columns': columns, 'affected_rows': affected}
+    if operation == 'standardize_format':
+        text_columns = frame.select_dtypes(include=['object', 'string']).columns.tolist()
+        trimmed_cells = 0
+        for column in text_columns:
+            original = frame[column].copy()
+            frame[column] = frame[column].map(lambda value: value.strip() if isinstance(value, str) else value)
+            trimmed_cells += int((original != frame[column]).fillna(False).sum())
+        date_columns = []
+        invalid_dates = 0
+        numeric_columns = []
+        numeric_cells = 0
+        for column in frame.columns:
+            name = str(column).lower()
+            if any(word in name for word in ('date', 'time', 'month', 'year')) and not pd.api.types.is_numeric_dtype(frame[column]):
+                parsed = pd.to_datetime(frame[column], format='mixed', errors='coerce')
+                if parsed.notna().any() or frame[column].notna().any():
+                    invalid_dates += int(parsed.isna().sum() - frame[column].isna().sum())
+                    frame[column] = parsed.dt.strftime('%Y-%m-%d')
+                    date_columns.append(str(column))
+                    continue
+            numeric = _numeric_series(frame, column)
+            non_null = int(frame[column].notna().sum())
+            if non_null and numeric.notna().sum() >= max(2, int(non_null * 0.8)) and not any(word in name for word in ('id', 'zip', 'postal', 'phone')):
+                original = frame[column].copy()
+                frame[column] = numeric
+                numeric_cells += int((original.astype('string') != frame[column].astype('string')).fillna(False).sum())
+                numeric_columns.append(str(column))
+        return frame, {'text_columns': [str(column) for column in text_columns], 'date_columns': date_columns, 'numeric_columns': numeric_columns, 'trimmed_cells': trimmed_cells, 'numeric_cells_normalized': numeric_cells, 'invalid_dates_normalized': max(0, invalid_dates), 'affected_rows': before}
     if operation == 'remove_duplicates':
         frame = frame.drop_duplicates().copy()
         return frame, {'removed_rows': before - len(frame), 'affected_rows': before - len(frame)}
@@ -29,9 +59,9 @@ def apply(frame: pd.DataFrame, operation: str) -> tuple[pd.DataFrame, dict]:
     if operation == 'parse_dates':
         changed = []
         for column in frame.columns:
-            if any(word in str(column).lower() for word in ('date', 'time', 'month', 'year')):
-                parsed = pd.to_datetime(frame[column], errors='coerce')
-                if parsed.notna().any(): frame[column] = parsed; changed.append(column)
+            if any(word in str(column).lower() for word in ('date', 'time', 'month', 'year')) and not pd.api.types.is_numeric_dtype(frame[column]):
+                parsed = pd.to_datetime(frame[column], format='mixed', errors='coerce')
+                if parsed.notna().any() or frame[column].notna().any(): frame[column] = parsed.dt.strftime('%Y-%m-%d'); changed.append(column)
         return frame, {'columns': changed, 'affected_rows': before}
     if operation == 'fill_missing':
         changed = 0

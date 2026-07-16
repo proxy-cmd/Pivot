@@ -4,6 +4,7 @@ from backend.app.analytics import forecast, prepare_frame, profile_frame, scenar
 from backend.app.assistant import answer_question
 from backend.app.rag import chunks, retrieve
 from backend.app.security import validate_readonly_sql
+from backend.app.pipeline import apply
 
 
 def test_forecast_has_intervals():
@@ -50,3 +51,27 @@ def test_assistant_explains_largest_time_drop_and_driver():
     assert result['rows'][0]['period'] == '2025-03'
     assert result['driver_rows']
     assert result['visualization']['type'] == 'line'
+
+
+def test_assistant_can_forecast_and_flag_anomalies():
+    frame = prepare_frame(pd.DataFrame({
+        'order_date': pd.date_range('2025-01-01', periods=8, freq='MS'),
+        'sales': [100, 110, 120, 130, 140, 150, 160, 1000],
+    }))
+    profile = profile_frame(frame, 'sales.csv')
+    forecast_result = answer_question('Forecast the next months of sales', frame, profile)
+    anomaly_result = answer_question('Show unusual sales outliers', frame, profile)
+    assert forecast_result['intent'] == 'forecast'
+    assert len(forecast_result['rows']) == 11
+    assert anomaly_result['intent'] == 'anomaly'
+    assert anomaly_result['rows']
+
+
+def test_standardize_format_normalizes_dates_text_and_numbers():
+    frame = pd.DataFrame({'order_date': ['2025/01/01', 'not-a-date'], 'product': [' A ', 'B'], 'sales': ['$1,200', '800']})
+    cleaned, metrics = apply(frame, 'standardize_format')
+    assert cleaned.loc[0, 'order_date'] == '2025-01-01'
+    assert pd.isna(cleaned.loc[1, 'order_date'])
+    assert cleaned.loc[0, 'product'] == 'A'
+    assert cleaned.loc[0, 'sales'] == 1200
+    assert metrics['invalid_dates_normalized'] == 1

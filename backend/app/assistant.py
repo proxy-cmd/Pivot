@@ -8,11 +8,12 @@ is a structured result rather than a query-generation demo.
 """
 
 import re
+import json
 from typing import Any
 
 import pandas as pd
 
-from .analytics import _numeric_series
+from .analytics import _numeric_series, forecast
 
 
 MONEY_WORDS = ("revenue", "sales", "amount", "price", "cost", "profit", "margin", "total", "value")
@@ -111,6 +112,10 @@ def _chart(chart_type: str, title: str, data: list[dict[str, Any]], x: str = "la
     return {"type": chart_type, "title": title, "data": data, "x": x, "y": y}
 
 
+def json_safe_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return json.loads(json.dumps(rows, default=str))
+
+
 def _base(profile: dict[str, Any], frame: pd.DataFrame) -> dict[str, Any]:
     return {
         "dataset_rows": int(len(frame)),
@@ -153,6 +158,29 @@ def answer_question(question: str, frame: pd.DataFrame, profile: dict[str, Any])
         strongest = pairs[0] if pairs else None
         answer = f"The strongest observed relationship is between {strongest['field_1']} and {strongest['field_2']} (correlation {strongest['correlation']:.3f}). Correlation is association, not proof that one field causes the other." if strongest else "There are not enough complete numeric fields to calculate a relationship."
         return {"answer": answer, "insights": [], "visualization": None, "rows": pairs[:20], "sql": "SELECT * FROM dataset LIMIT 200", "intent": "correlation", "evidence": base}
+
+    if any(word in normalized for word in ("forecast", "predict", "projection", "future")) and date_column and metric:
+        periods, cadence = _period_values(frame, date_column, metric, question)
+        projection = forecast(periods["value"].tolist())
+        if not projection.get("available"):
+            return {"answer": projection.get("reason", "There are not enough clean time periods for a forecast."), "insights": [], "visualization": None, "rows": [], "sql": None, "intent": "forecast", "evidence": base}
+        last_period = pd.Period(periods.iloc[-1]["period"], freq={"monthly": "M", "quarterly": "Q", "weekly": "W", "yearly": "Y"}[cadence])
+        future_labels = [str(last_period + index) for index in range(1, len(projection["forecast"]) + 1)]
+        rows = [{"period": str(period), "value": float(value), "kind": "historical"} for period, value in zip(periods["period"], periods["value"])]
+        rows.extend({"period": period, "value": value, "kind": "forecast", "lower": projection["lower"][index], "upper": projection["upper"][index]} for index, (period, value) in enumerate(zip(future_labels, projection["forecast"])))
+        answer = f"The {cadence} projection for {metric} is {', '.join(f'{label}: {value:,.2f}' for label, value in zip(future_labels, projection['forecast']))}. This is a {projection['confidence']} confidence linear trend projection, not a causal prediction."
+        return {"answer": answer, "insights": [projection.get("assumption", "")], "visualization": _chart("line", f"{metric} forecast", [{"label": row["period"], "value": row["value"]} for row in rows]), "rows": rows, "sql": "SELECT * FROM dataset LIMIT 200", "intent": "forecast", "evidence": base | {"metric": metric, "date_column": date_column}}
+
+    if any(word in normalized for word in ("outlier", "outliers", "unusual", "anomaly", "anomalies")) and metric:
+        values = _numeric_series(frame, metric)
+        clean = values.dropna()
+        if len(clean) < 4:
+            return {"answer": f"There are not enough usable {metric} values to identify unusual records.", "insights": [], "visualization": None, "rows": [], "sql": None, "intent": "anomaly", "evidence": base}
+        q1, q3 = clean.quantile([0.25, 0.75]); iqr = q3 - q1
+        flagged = frame.loc[(values < q1 - 1.5 * iqr) | (values > q3 + 1.5 * iqr)].copy()
+        flagged["value"] = values.loc[flagged.index].round(2)
+        rows = json_safe_rows(flagged.head(50).to_dict(orient="records"))
+        return {"answer": f"I found {len(flagged):,} unusual {metric} records using the 1.5× IQR rule. These are candidates for review, not automatic errors.", "insights": [f"Typical range: {q1:,.2f} to {q3:,.2f}; flagged values are outside the IQR fence."], "visualization": None, "rows": rows, "sql": f"SELECT * FROM dataset WHERE {quote(metric)} < {float(q1 - 1.5 * iqr)} OR {quote(metric)} > {float(q3 + 1.5 * iqr)} LIMIT 200", "intent": "anomaly", "evidence": base | {"metric": metric}}
 
     if any(word in normalized for word in ("how many rows", "row count", "number of rows", "how many records", "records are")):
         count = len(frame)

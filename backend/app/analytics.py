@@ -71,7 +71,7 @@ def profile_frame(frame: pd.DataFrame, filename: str) -> dict[str, Any]:
         non_null = max(int(frame[column].notna().sum()), 1)
         named_date = any(word in column for word in DATE_WORDS)
         value_date = not pd.api.types.is_numeric_dtype(frame[column]) and parsed.notna().sum() >= max(3, int(len(sample_values) * 0.8)) and parsed.nunique(dropna=True) >= 3
-        if named_date and parsed.notna().sum() >= max(2, int(non_null * 0.2)) or value_date:
+        if named_date and parsed.notna().sum() >= max(1, int(non_null * 0.2)) or value_date:
             date_cols.append(column)
     ids = [column for column in frame.columns if column.endswith('_id') or any(word in column for word in ID_WORDS)]
     numeric = []

@@ -356,7 +356,7 @@ def plan_transformation(dataset_id: str, body: TransformRequest):
 @app.post('/api/datasets/{dataset_id}/transformations/{operation}/preview')
 def preview_transformation(dataset_id: str, operation: str):
     item = _dataset_or_404(dataset_id)
-    if operation not in {'trim_text', 'remove_duplicates', 'normalize_columns', 'parse_dates', 'fill_missing', 'remove_outliers'}:
+    if operation not in {'trim_text', 'remove_duplicates', 'normalize_columns', 'parse_dates', 'fill_missing', 'remove_outliers', 'standardize_format'}:
         raise HTTPException(422, 'Unsupported transformation.')
     source = _read_source(item)
     try:
@@ -511,6 +511,30 @@ def run_scenario(body: ScenarioRequest):
     return scenario(body.price_change, body.marketing_change, body.cost_change, body.baseline_revenue)
 
 
+def _requested_transformation(question: str) -> str | None:
+    """Map an explicit cleaning request to one safe, versioned operation."""
+    text = question.lower()
+    tokens = set(re.findall(r'[a-z]+', text))
+    action_words = ('fix', 'clean', 'standardize', 'normalize', 'format', 'remove', 'fill', 'correct', 'update')
+    if not any(word in tokens for word in action_words):
+        return None
+    if any(word in tokens for word in ('outlier', 'outliers', 'anomal')) or 'extreme value' in text:
+        return 'remove_outliers'
+    if any(word in tokens for word in ('duplicate', 'duplicates')) or 'repeated row' in text:
+        return 'remove_duplicates'
+    if any(word in tokens for word in ('missing', 'null', 'blank')):
+        return 'fill_missing'
+    if any(word in tokens for word in ('date', 'dates', 'timestamp')) or 'time format' in text:
+        return 'parse_dates'
+    if any(phrase in text for phrase in ('column name', 'field name', 'headers')):
+        return 'normalize_columns'
+    if any(word in tokens for word in ('whitespace', 'spaces', 'trim')):
+        return 'trim_text'
+    if any(word in tokens for word in ('format', 'formats', 'messy', 'standard', 'standardize')) or 'clean data' in text:
+        return 'standardize_format'
+    return None
+
+
 @app.post('/api/chat-legacy')
 def chat(body: ChatRequest):
     if not body.dataset_id:
@@ -574,6 +598,34 @@ def chat_v2(body: ChatRequest):
         return {'answer': 'Upload a dataset before asking the analyst to investigate.', 'source': 'guardrail', 'citations': []}
     item = _dataset_or_404(body.dataset_id)
     profile = item.get('profile') or {}
+    retrieved = retrieve(body.question, chunks_for(body.dataset_id))
+    citations = [{'source': item['name'], 'score': 1.0}]
+    citations.extend({'source': value['source'], 'score': value['score']} for value in retrieved)
+    operation = _requested_transformation(body.question)
+    if operation:
+        preview = preview_transformation(body.dataset_id, operation)
+        preview_rows = preview.get('after_preview') or []
+        preview_columns = list(preview_rows[0].keys()) if preview_rows else []
+        action = {'type': 'transformation', 'operation': operation, 'metrics': preview.get('metrics', {}), 'preview_id': preview.get('id')}
+        if operation != 'remove_outliers':
+            approved = approve_transformation(body.dataset_id, preview['id'])
+            version = approved['version']
+            action.update({'status': 'approved', 'version': version})
+            return {
+                'answer': f"Done. I created version {version} with the {operation.replace('_', ' ')} update. The original source is preserved. Any values that could not be interpreted safely were left blank instead of guessed.",
+                'source': 'pivot-analyst', 'intent': 'transformation', 'sql': None,
+                'query_result': {'columns': preview_columns, 'rows': preview_rows, 'count': len(preview_rows)},
+                'rows': preview_rows, 'insights': [f"Rows: {approved.get('rows_before', 0):,} → {approved.get('rows_after', 0):,}.", 'The new version is available as a CSV download.'],
+                'driver_rows': [], 'visualization': None, 'evidence': {'operation': operation, 'version': version},
+                'action': action, 'download_url': f"/api/datasets/{body.dataset_id}/versions/{version}/download", 'citations': citations,
+            }
+        return {
+            'answer': f"I prepared a preview for {operation.replace('_', ' ')}. Because extreme values can be legitimate business events, review the proposed row removals in Cleaning before approving it.",
+            'source': 'pivot-analyst', 'intent': 'transformation-preview', 'sql': None,
+            'query_result': {'columns': preview_columns, 'rows': preview_rows, 'count': len(preview_rows)},
+            'rows': preview_rows, 'insights': [f"Rows: {preview.get('rows_before', 0):,} → {preview.get('rows_after', 0):,}."],
+            'driver_rows': [], 'visualization': None, 'evidence': {'operation': operation}, 'action': action, 'download_url': None, 'citations': citations,
+        }
     result = answer_question(body.question, _read_source(item), profile)
     if result.get('intent') == 'clarification' and settings.gemini_api_key:
         try:
@@ -589,9 +641,6 @@ def chat_v2(body: ChatRequest):
     rows = result.get('rows') or []
     columns = list(rows[0].keys()) if rows else []
     query_result = {'columns': columns, 'rows': rows[:200], 'count': len(rows)} if rows else None
-    retrieved = retrieve(body.question, chunks_for(body.dataset_id))
-    citations = [{'source': item['name'], 'score': 1.0}]
-    citations.extend({'source': value['source'], 'score': value['score']} for value in retrieved)
     return {
         'answer': result['answer'],
         'source': 'pivot-analyst',
@@ -603,6 +652,8 @@ def chat_v2(body: ChatRequest):
         'driver_rows': result.get('driver_rows', []),
         'visualization': result.get('visualization'),
         'evidence': result.get('evidence', {}),
+        'action': None,
+        'download_url': None,
         'citations': citations,
     }
 

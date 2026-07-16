@@ -9,7 +9,7 @@ class ChatRequest(BaseModel):
 
 
 class TransformRequest(BaseModel):
-    operation: str = Field(pattern='^(trim_text|remove_duplicates|normalize_columns|parse_dates|fill_missing|remove_outliers)$')
+    operation: str = Field(pattern='^(trim_text|remove_duplicates|normalize_columns|parse_dates|fill_missing|remove_outliers|standardize_format)$')
     note: str = Field(default='', max_length=500)
 
 

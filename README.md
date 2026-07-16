@@ -115,6 +115,8 @@ The analyst is an evidence-first question-answering layer, not an SQL generator.
 - Supporting result rows and associated group changes
 - A safe read-only SQL trace that can be inspected or reproduced
 
+The analyst can also act on explicit cleaning requests. For example, “fix the invalid date formats and give me an updated CSV” creates a new version, normalizes parseable dates, preserves the original file, and returns a download action. Uncertain values are left blank rather than guessed. Outlier removal remains preview-first because extreme values can be legitimate business events.
+
 Built-in analysis works without an API key for common questions such as totals, averages, trends, rankings, largest period drops, quality findings, and correlations. Optional Gemini support provides a natural-language fallback for questions the deterministic analyst cannot map confidently.
 
 ---
@@ -151,7 +153,8 @@ Current analytical capabilities include:
 - Period-over-period change analysis
 - Observed driver comparisons for time drops
 - Correlation analysis
-- Forecasting
+- Forecasting from detected time series
+- IQR-based anomaly review
 - Confidence intervals
 - Scenario simulation
 - Anomaly detection

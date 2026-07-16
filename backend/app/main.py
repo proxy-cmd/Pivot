@@ -598,7 +598,12 @@ def chat_v2(body: ChatRequest):
         return {'answer': 'Upload a dataset before asking the analyst to investigate.', 'source': 'guardrail', 'citations': []}
     item = _dataset_or_404(body.dataset_id)
     profile = item.get('profile') or {}
-    retrieved = retrieve(body.question, chunks_for(body.dataset_id))
+    question = body.question.strip()
+    history = body.context.get('history') if isinstance(body.context, dict) else []
+    previous_user_question = next((entry.get('text', '') for entry in reversed(history or []) if entry.get('role') == 'user' and entry.get('text')), '')
+    if previous_user_question and (len(question.split()) <= 6 or any(phrase in question.lower() for phrase in ('why', 'what changed', 'tell me more', 'that result'))):
+        question = f'{previous_user_question} Follow-up: {question}'
+    retrieved = retrieve(question, chunks_for(body.dataset_id))
     citations = [{'source': item['name'], 'score': 1.0}]
     citations.extend({'source': value['source'], 'score': value['score']} for value in retrieved)
     operation = _requested_transformation(body.question)
@@ -626,12 +631,20 @@ def chat_v2(body: ChatRequest):
             'rows': preview_rows, 'insights': [f"Rows: {preview.get('rows_before', 0):,} → {preview.get('rows_after', 0):,}."],
             'driver_rows': [], 'visualization': None, 'evidence': {'operation': operation}, 'action': action, 'download_url': None, 'citations': citations,
         }
-    result = answer_question(body.question, _read_source(item), profile)
+    if operation is None and any(word in body.question.lower() for word in ('download', 'export')) and any(word in body.question.lower() for word in ('csv', 'dataset', 'data', 'file')):
+        version = int(item.get('active_version') or 0)
+        return {
+            'answer': f"Your current dataset is ready as CSV from active version {version}.", 'source': 'pivot-analyst', 'intent': 'export', 'sql': None,
+            'query_result': None, 'rows': [], 'insights': ['The original source remains preserved; this link points to the currently active version.'],
+            'driver_rows': [], 'visualization': None, 'evidence': {'version': version}, 'action': {'type': 'export', 'status': 'approved', 'version': version},
+            'download_url': f"/api/datasets/{body.dataset_id}/versions/{version}/download", 'citations': citations,
+        }
+    result = answer_question(question, _read_source(item), profile)
     if result.get('intent') == 'clarification' and settings.gemini_api_key:
         try:
             from google import genai
             evidence = json.dumps({'schema': profile.get('schema', {}), 'profile': profile.get('metrics', {}), 'preview': result.get('rows', [])[:20]}, default=str)[:12000]
-            prompt = f'''You are Pivot Analyst, a friendly senior data analyst. Answer the user's question in plain English using only the dataset evidence below. Do not output SQL. Do not invent numbers or claim causation. If the evidence is insufficient, say what field or clarification is needed. Keep the answer concise and useful.\n\nEvidence:\n{evidence}\n\nQuestion: {body.question}'''
+            prompt = f'''You are Pivot Analyst, a friendly senior data analyst. Answer the user's question in plain English using only the dataset evidence below. Do not output SQL. Do not invent numbers or claim causation. If the evidence is insufficient, say what field or clarification is needed. Keep the answer concise and useful.\n\nEvidence:\n{evidence}\n\nQuestion: {question}'''
             response = genai.Client(api_key=settings.gemini_api_key).models.generate_content(model=settings.gemini_model, contents=prompt)
             if response.text:
                 result['answer'] = response.text.strip()

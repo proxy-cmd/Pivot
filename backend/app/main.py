@@ -94,6 +94,7 @@ def _profile_payload(frame: pd.DataFrame, filename: str, dataset_id: str) -> dic
         'whitespace': ('trim_text', 'Trim text fields'),
         'invalid_dates': ('parse_dates', 'Parse detected date fields'),
         'outliers': ('remove_outliers', 'Review numeric outliers'),
+        'negative_values': ('remove_outliers', 'Review negative and extreme numeric values'),
     }
     recommendations = []
     for issue in result.get('issues', []):
@@ -574,6 +575,17 @@ def chat_v2(body: ChatRequest):
     item = _dataset_or_404(body.dataset_id)
     profile = item.get('profile') or {}
     result = answer_question(body.question, _read_source(item), profile)
+    if result.get('intent') == 'clarification' and settings.gemini_api_key:
+        try:
+            from google import genai
+            evidence = json.dumps({'schema': profile.get('schema', {}), 'profile': profile.get('metrics', {}), 'preview': result.get('rows', [])[:20]}, default=str)[:12000]
+            prompt = f'''You are Pivot Analyst, a friendly senior data analyst. Answer the user's question in plain English using only the dataset evidence below. Do not output SQL. Do not invent numbers or claim causation. If the evidence is insufficient, say what field or clarification is needed. Keep the answer concise and useful.\n\nEvidence:\n{evidence}\n\nQuestion: {body.question}'''
+            response = genai.Client(api_key=settings.gemini_api_key).models.generate_content(model=settings.gemini_model, contents=prompt)
+            if response.text:
+                result['answer'] = response.text.strip()
+                result['intent'] = 'gemini-explanation'
+        except Exception:
+            pass
     rows = result.get('rows') or []
     columns = list(rows[0].keys()) if rows else []
     query_result = {'columns': columns, 'rows': rows[:200], 'count': len(rows)} if rows else None

@@ -98,24 +98,24 @@ Current transformation pipeline supports:
 - Remove duplicates
 - Normalize names
 - Parse dates
+- Fill missing values with type-aware defaults
+- Review and remove numeric outliers
 
-Approved transformations create new dataset versions while preserving the original source.
+Every operation is previewed first. Approved transformations create a new dataset version while preserving the original source.
 
 ---
 
 ## AI Analyst
 
-Pivot integrates Retrieval-Augmented Generation (RAG) instead of allowing unrestricted LLM access.
+The analyst is an evidence-first question-answering layer, not an SQL generator. It detects the relevant date, metric, and grouping fields, calculates the result from the active dataframe, and returns:
 
-The AI:
+- A plain-English answer
+- Key observations and limitations
+- A line or bar visualization when the question supports one
+- Supporting result rows and associated group changes
+- A safe read-only SQL trace that can be inspected or reproduced
 
-- Retrieves dataset metadata
-- Retrieves relevant document chunks
-- Uses TF-IDF retrieval
-- Grounds every answer in available evidence
-- Supports Gemini (optional)
-
-The language model never interacts directly with raw datasets without retrieval and validation.
+Built-in analysis works without an API key for common questions such as totals, averages, trends, rankings, largest period drops, quality findings, and correlations. Optional Gemini support provides a natural-language fallback for questions the deterministic analyst cannot map confidently.
 
 ---
 
@@ -147,6 +147,10 @@ Current analytical capabilities include:
 - KPI summaries
 - Business health scoring
 - Trend analysis
+- Grouped rankings and breakdowns
+- Period-over-period change analysis
+- Observed driver comparisons for time drops
+- Correlation analysis
 - Forecasting
 - Confidence intervals
 - Scenario simulation
@@ -169,10 +173,10 @@ The application supports:
 
 ## Frontend
 
-- React
-- TypeScript
-- Tailwind CSS
+- React JSX
 - Vite
+- Recharts
+- Custom CSS workspace UI
 
 ---
 

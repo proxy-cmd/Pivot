@@ -591,76 +591,306 @@ def chat(body: ChatRequest):
     return {'answer': f"Hi — I’m connected to {item['name']}. I found {profile.get('rows', 0)} rows and {profile.get('columns', 0)} detected fields. Ask me about trends, quality, categories, or values and I’ll investigate the source.", 'source': 'dataset-aware', 'sql': query, 'citations': sources}
 
 
+def call_gemini(prompt: str) -> str | None:
+    settings = get_settings()
+    if not settings.gemini_api_key:
+        return None
+    try:
+        from google import genai
+        client = genai.Client(api_key=settings.gemini_api_key)
+        response = client.models.generate_content(
+            model=settings.gemini_model,
+            contents=prompt
+        )
+        return response.text
+    except Exception as e:
+        print(f"Gemini call failed: {e}")
+        return None
+
+
+def extract_json(text: str) -> dict | None:
+    if not text:
+        return None
+    try:
+        # Find json block ```json ... ```
+        match = re.search(r'```json\s*(.*?)\s*```', text, re.DOTALL)
+        if match:
+            return json.loads(match.group(1).strip())
+        
+        # Try raw json parsing
+        cleaned = text.strip()
+        if cleaned.startswith('{') and cleaned.endswith('}'):
+            return json.loads(cleaned)
+            
+        # Try finding first { and last }
+        start = cleaned.find('{')
+        end = cleaned.rfind('}')
+        if start != -1 and end != -1:
+            return json.loads(cleaned[start:end+1])
+    except Exception:
+        pass
+    return None
+
+
 @app.post('/api/chat')
 def chat_v2(body: ChatRequest):
     """Answer in analyst format: prose, insights, chart data and evidence rows."""
     if not body.dataset_id:
         return {'answer': 'Upload a dataset before asking the analyst to investigate.', 'source': 'guardrail', 'citations': []}
+    
     item = _dataset_or_404(body.dataset_id)
     profile = item.get('profile') or {}
     question = body.question.strip()
     history = body.context.get('history') if isinstance(body.context, dict) else []
-    previous_user_question = next((entry.get('text', '') for entry in reversed(history or []) if entry.get('role') == 'user' and entry.get('text')), '')
-    if previous_user_question and (len(question.split()) <= 6 or any(phrase in question.lower() for phrase in ('why', 'what changed', 'tell me more', 'that result'))):
-        question = f'{previous_user_question} Follow-up: {question}'
     retrieved = retrieve(question, chunks_for(body.dataset_id))
     citations = [{'source': item['name'], 'score': 1.0}]
     citations.extend({'source': value['source'], 'score': value['score']} for value in retrieved)
-    operation = _requested_transformation(body.question)
-    if operation:
-        preview = preview_transformation(body.dataset_id, operation)
-        preview_rows = preview.get('after_preview') or []
-        preview_columns = list(preview_rows[0].keys()) if preview_rows else []
-        action = {'type': 'transformation', 'operation': operation, 'metrics': preview.get('metrics', {}), 'preview_id': preview.get('id')}
-        if operation != 'remove_outliers':
-            approved = approve_transformation(body.dataset_id, preview['id'])
-            version = approved['version']
-            action.update({'status': 'approved', 'version': version})
-            return {
-                'answer': f"Done. I created version {version} with the {operation.replace('_', ' ')} update. The original source is preserved. Any values that could not be interpreted safely were left blank instead of guessed.",
-                'source': 'pivot-analyst', 'intent': 'transformation', 'sql': None,
-                'query_result': {'columns': preview_columns, 'rows': preview_rows, 'count': len(preview_rows)},
-                'rows': preview_rows, 'insights': [f"Rows: {approved.get('rows_before', 0):,} → {approved.get('rows_after', 0):,}.", 'The new version is available as a CSV download.'],
-                'driver_rows': [], 'visualization': None, 'evidence': {'operation': operation, 'version': version},
-                'action': action, 'download_url': f"/api/datasets/{body.dataset_id}/versions/{version}/download", 'citations': citations,
-            }
-        return {
-            'answer': f"I prepared a preview for {operation.replace('_', ' ')}. Because extreme values can be legitimate business events, review the proposed row removals in Cleaning before approving it.",
-            'source': 'pivot-analyst', 'intent': 'transformation-preview', 'sql': None,
-            'query_result': {'columns': preview_columns, 'rows': preview_rows, 'count': len(preview_rows)},
-            'rows': preview_rows, 'insights': [f"Rows: {preview.get('rows_before', 0):,} → {preview.get('rows_after', 0):,}."],
-            'driver_rows': [], 'visualization': None, 'evidence': {'operation': operation}, 'action': action, 'download_url': None, 'citations': citations,
+
+    # --- Step 1: AI Routing ---
+    intent = "general_chat"
+    sql_query = None
+    cleaning_op = None
+    reasoning = ""
+    
+    if settings.gemini_api_key:
+        columns_list = profile.get('columns_list', [])
+        schema_info = profile.get('schema', {})
+        issues = profile.get('issues', [])
+        
+        metadata = {
+            'dataset_name': item['name'],
+            'rows': profile.get('rows', 0),
+            'columns': columns_list,
+            'numeric_columns': schema_info.get('numeric_columns', []),
+            'date_columns': schema_info.get('date_columns', []),
+            'issues': [{'type': iss['type'], 'count': iss['count']} for iss in issues]
         }
-    if operation is None and any(word in body.question.lower() for word in ('download', 'export')) and any(word in body.question.lower() for word in ('csv', 'dataset', 'data', 'file')):
-        version = int(item.get('active_version') or 0)
-        return {
-            'answer': f"Your current dataset is ready as CSV from active version {version}.", 'source': 'pivot-analyst', 'intent': 'export', 'sql': None,
-            'query_result': None, 'rows': [], 'insights': ['The original source remains preserved; this link points to the currently active version.'],
-            'driver_rows': [], 'visualization': None, 'evidence': {'version': version}, 'action': {'type': 'export', 'status': 'approved', 'version': version},
-            'download_url': f"/api/datasets/{body.dataset_id}/versions/{version}/download", 'citations': citations,
-        }
-    result = answer_question(question, _read_source(item), profile)
-    if result.get('intent') == 'clarification' and settings.gemini_api_key:
+        
+        history_formatted = []
+        for entry in history[-6:]:
+            role = entry.get('role', '')
+            text_content = entry.get('text', '')
+            if text_content:
+                history_formatted.append(f"{'User' if role == 'user' else 'Analyst'}: {text_content}")
+                
+        router_prompt = f"""You are the routing and analysis agent for Pivot, an intelligent data analyst platform.
+Your task is to analyze the user's question and determine the appropriate action.
+
+Dataset Profile:
+{json.dumps(metadata, indent=2)}
+
+Conversation History:
+{chr(10).join(history_formatted)}
+
+User Question: "{question}"
+
+You must choose one of the following intents:
+1. "query": The user is asking to calculate, search, aggregate, filter, group, or inspect numerical/categorical data. Write a single, valid SQLite SELECT query to run against the 'dataset' table to get the supporting evidence.
+   - Do NOT write delete, insert, update or alter queries.
+   - Ensure the query uses exact column names from the Profile.
+   - For yearly/monthly trend grouping, use `strftime('%Y-%m', date_column)` or `strftime('%Y', date_column)`.
+2. "cleaning": The user wants to clean, format, normalize column names, parse dates, trim whitespace, fill missing nulls, remove duplicates, or handle outliers.
+   - Set 'cleaning_operation' to one of: 'trim_text', 'remove_duplicates', 'normalize_columns', 'parse_dates', 'fill_missing', 'remove_outliers', 'standardize_format'.
+3. "general_chat": The user is greeting you ("hi", "hello"), thanking you ("thanks", "got it"), asking general questions about your identity, or asking a question that does not relate to this dataset.
+
+Respond ONLY with a JSON block in this exact format (no markdown except the json container):
+```json
+{{
+  "intent": "query" | "cleaning" | "general_chat",
+  "sql": "SELECT ...", // required only if intent is 'query'
+  "cleaning_operation": "operation_name", // required only if intent is 'cleaning'
+  "reasoning": "Brief explanation of your decision"
+}}
+```"""
+        
+        router_response = call_gemini(router_prompt)
+        router_json = extract_json(router_response)
+        
+        if router_json:
+            intent = router_json.get('intent', 'general_chat')
+            sql_query = router_json.get('sql')
+            cleaning_op = router_json.get('cleaning_operation')
+            reasoning = router_json.get('reasoning', '')
+
+    # --- Step 2: Intent Execution ---
+    
+    # 2.1 Cleaning/Formatting request
+    if intent == 'cleaning' and cleaning_op:
         try:
-            from google import genai
-            evidence = json.dumps({'schema': profile.get('schema', {}), 'profile': profile.get('metrics', {}), 'preview': result.get('rows', [])[:20]}, default=str)[:12000]
-            prompt = f'''You are Pivot Analyst, a friendly senior data analyst. Answer the user's question in plain English using only the dataset evidence below. Do not output SQL. Do not invent numbers or claim causation. If the evidence is insufficient, say what field or clarification is needed. Keep the answer concise and useful.\n\nEvidence:\n{evidence}\n\nQuestion: {question}'''
-            response = genai.Client(api_key=settings.gemini_api_key).models.generate_content(model=settings.gemini_model, contents=prompt)
-            if response.text:
-                result['answer'] = response.text.strip()
+            preview = preview_transformation(body.dataset_id, cleaning_op)
+            preview_rows = preview.get('after_preview') or []
+            preview_columns = list(preview_rows[0].keys()) if preview_rows else []
+            action = {'type': 'transformation', 'operation': cleaning_op, 'metrics': preview.get('metrics', {}), 'preview_id': preview.get('id')}
+            
+            if cleaning_op != 'remove_outliers':
+                approved = approve_transformation(body.dataset_id, preview['id'])
+                version = approved['version']
+                action.update({'status': 'approved', 'version': version})
+                
+                explanation = f"Done. I analyzed your dataset and dynamically executed the cleanup operation: **{cleaning_op.replace('_', ' ')}**. Standardized values are versioned and ready as version {version}."
+                if settings.gemini_api_key:
+                    try:
+                        explain_prompt = f"Explain to the user in a friendly senior data analyst tone that you've just executed the dataset cleaning operation '{cleaning_op}' successfully, resulting in version {version}. Summarize the impact: rows changed from {preview.get('rows_before')} to {preview.get('rows_after')}."
+                        res = call_gemini(explain_prompt)
+                        if res:
+                            explanation = res.strip()
+                    except Exception:
+                        pass
+                
+                return {
+                    'answer': explanation,
+                    'source': 'pivot-analyst', 'intent': 'transformation', 'sql': None,
+                    'query_result': {'columns': preview_columns, 'rows': preview_rows[:10], 'count': len(preview_rows)},
+                    'rows': preview_rows[:10], 'insights': [f"Rows: {approved.get('rows_before', 0):,} → {approved.get('rows_after', 0):,}.", 'The updated version is saved in your versions timeline.'],
+                    'driver_rows': [], 'visualization': None, 'evidence': {'operation': cleaning_op, 'version': version},
+                    'action': action, 'download_url': f"/api/datasets/{body.dataset_id}/versions/{version}/download", 'citations': citations,
+                }
+            else:
+                return {
+                    'answer': "I prepared a preview for outlier removal. Outliers can represent legitimate spikes, so review the proposed changes in Cleaning.",
+                    'source': 'pivot-analyst', 'intent': 'transformation-preview', 'sql': None,
+                    'query_result': {'columns': preview_columns, 'rows': preview_rows[:10], 'count': len(preview_rows)},
+                    'rows': preview_rows[:10], 'insights': [f"Proposed: {preview.get('rows_before', 0):,} → {preview.get('rows_after', 0):,} rows."],
+                    'driver_rows': [], 'visualization': None, 'evidence': {'operation': cleaning_op}, 'action': action, 'download_url': None, 'citations': citations,
+                }
+        except Exception as e:
+            print(f"Cleaning execution failed: {e}")
+            # fall through to deterministic/fallback assistant
+
+    # 2.2 Data query request
+    if intent == 'query' and sql_query:
+        try:
+            validated_query = validate_readonly_sql(sql_query)
+            query_result = _execute_frame(_read_source(item), validated_query)
+            
+            explain_prompt = f"""You are Pivot Analyst, an expert senior data analyst.
+User Question: "{question}"
+
+To answer this question, the following SQLite query was run against the table 'dataset':
+```sql
+{validated_query}
+```
+
+Result returned:
+Columns: {query_result['columns']}
+Rows: {json.dumps(query_result['rows'][:30], indent=2)}
+Total count of matching records: {query_result['count']}
+
+Please summarize these findings and answer the user's question in plain English.
+- Be precise and refer to the exact numbers from the query results.
+- If the user asks "why" or "what changed", perform a analysis of the query results and explain the cause-and-effect relationship shown in the data.
+- Design a chart visualization if a chart would help represent the query result (e.g. trends over time, comparisons of categories).
+
+Respond ONLY with a JSON block in this exact format:
+```json
+{{
+  "answer": "Plain English answer explaining the data and results...",
+  "insights": ["Key insight bullet 1", "Key insight bullet 2"], // 1 to 3 items
+  "visualization": {{
+    "type": "line" | "bar",
+    "title": "Descriptive Chart Title",
+    "x": "column_name_for_x_axis",
+    "y": "column_name_for_y_axis",
+    "data": [
+      {{"label": "X_value_1", "value": Y_numeric_value_1}},
+      ...
+    ]
+  }} // include only if chart is applicable
+}}
+```"""
+            explain_response = call_gemini(explain_prompt)
+            explain_json = extract_json(explain_response)
+            
+            if explain_json:
+                answer = explain_json.get('answer', '')
+                insights = explain_json.get('insights', [])
+                visualization = explain_json.get('visualization')
+                
+                capped_rows = query_result['rows'][:10]
+                return {
+                    'answer': answer,
+                    'source': 'pivot-analyst',
+                    'intent': 'query',
+                    'sql': validated_query,
+                    'query_result': {'columns': query_result['columns'], 'rows': capped_rows, 'count': query_result['count']},
+                    'rows': capped_rows,
+                    'insights': insights,
+                    'driver_rows': [],
+                    'visualization': visualization,
+                    'evidence': {'query': validated_query},
+                    'action': None,
+                    'download_url': None,
+                    'citations': citations,
+                }
+        except Exception as e:
+            print(f"Query agent execution failed: {e}")
+            # fall through to deterministic/fallback assistant
+
+    # 2.3 General Chat or Fallback (for no API key or execution failure)
+    result = answer_question(question, _read_source(item), profile, history=history or [])
+    
+    # Handle needs_gemini fallback
+    if result.get('intent') == 'needs_gemini' and settings.gemini_api_key:
+        try:
+            # Build dataset context
+            schema_info = profile.get('schema', {})
+            columns_list = profile.get('columns_list', [])
+            data_summary = result.get('evidence', {}).get('data_summary', {})
+            dataset_context = json.dumps({
+                'dataset_name': item['name'],
+                'rows': profile.get('rows', 0),
+                'columns': columns_list,
+                'numeric_fields': schema_info.get('numeric_columns', []),
+                'date_fields': schema_info.get('date_columns', []),
+                'quality_score': profile.get('quality_score'),
+                'issues': profile.get('issues', []),
+                'metrics': profile.get('metrics', {}),
+                'sample_values': data_summary.get('sample_values', {}),
+            }, default=str)[:8000]
+
+            # Build multi-turn conversation for Gemini
+            system_prompt = f'''You are Pivot Analyst, an expert data analyst assistant. You are analyzing a dataset called "{item['name']}" with {profile.get('rows', 0):,} rows and {profile.get('columns', 0)} columns.
+
+RULES:
+- Answer ONLY in plain English. Never output SQL queries.
+- Reference actual data from the conversation history when available.
+- If a user asks "why" something happened, analyze the data patterns and provide plausible explanations.
+- Be specific with numbers. Don't make up numbers.
+- Keep answers concise but insightful — like a real senior data analyst would respond.
+- Format your response naturally with line breaks for readability.
+
+Dataset context:
+{dataset_context}'''
+
+            gemini_contents = [system_prompt]
+            for entry in (history or [])[-10:]:
+                role = entry.get('role', '')
+                text_content = entry.get('text', '')
+                if text_content and role in ('user', 'assistant'):
+                    gemini_contents.append(f"{'User' if role == 'user' else 'Analyst'}: {text_content}")
+            gemini_contents.append(f"User: {question}")
+
+            res_text = call_gemini('\n\n'.join(gemini_contents))
+            if res_text:
+                result['answer'] = res_text.strip()
                 result['intent'] = 'gemini-explanation'
         except Exception:
-            pass
+            available = result.get('available_fields', '')
+            result['answer'] = f"I can investigate this dataset but couldn't map that request to a reliable calculation. Available fields include {available}."
+            result['intent'] = 'clarification'
+
     rows = result.get('rows') or []
-    columns = list(rows[0].keys()) if rows else []
-    query_result = {'columns': columns, 'rows': rows[:200], 'count': len(rows)} if rows else None
+    display_rows = rows[:10]
+    columns = list(display_rows[0].keys()) if display_rows else []
+    query_result = {'columns': columns, 'rows': display_rows, 'count': len(rows)} if display_rows else None
+    
     return {
         'answer': result['answer'],
         'source': 'pivot-analyst',
         'intent': result.get('intent'),
         'sql': result.get('sql'),
         'query_result': query_result,
-        'rows': rows[:200],
+        'rows': display_rows,
         'insights': result.get('insights', []),
         'driver_rows': result.get('driver_rows', []),
         'visualization': result.get('visualization'),

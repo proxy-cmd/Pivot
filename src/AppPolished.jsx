@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Activity, AlertCircle, BarChart3, Bell, Bot, Check, CheckCircle2, ChevronDown, ChevronRight, Code2, Database, Download, FileBarChart2, GitBranch, LayoutDashboard, LineChart, LockKeyhole, Menu, Play, RefreshCw, Search, Send, Settings2, ShieldCheck, Sparkles, Table2, UserRound, WandSparkles, X } from 'lucide-react'
-import { Area, AreaChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
+import { Area, AreaChart, Bar, BarChart, CartesianGrid, Cell, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
 
 const API = (import.meta.env.VITE_API_URL || 'http://localhost:8000').replace(/\/$/, '')
 const NAV = [['Overview', LayoutDashboard], ['Profile', Table2], ['Quality', ShieldCheck], ['Cleaning', WandSparkles], ['Analysis', BarChart3], ['AI Analyst', Bot], ['SQL', Code2], ['Reports', FileBarChart2], ['Versions', GitBranch], ['Lineage', Activity], ['My Profile', UserRound]]
@@ -45,11 +45,77 @@ function Cleaning({ data, busy, preview, previewOp, approve, reject }) { const o
 function Analysis({ analyses, busy, selected, run }) { const result = selected?.result; const points = result?.chart || []; const rows = points.map(point => result.kind === 'trend' ? { period: point.label, [result.field || 'value']: point.value } : result.kind === 'breakdown' ? { [result.field || 'group']: point.label, count: point.value } : { range: point.label, count: point.value }); const columns = result?.kind === 'trend' ? ['period', result.field || 'value'] : result?.kind === 'breakdown' ? [result.field || 'group', 'count'] : ['range', 'count']; return <div className="workspace-page"><Head eyebrow="ANALYSIS / GENERATED" title="Analyses your data supports." copy="These options come from detected fields, so Pivot does not assume a business domain." /><div className="analysis-grid">{analyses.map(item => <article className={`analysis-card ${item.enabled ? '' : 'disabled'}`} key={item.id}><span className="analysis-icon"><BarChart3 size={17} /></span><h3>{item.title}</h3><p>{item.description}</p><Button variant="outline" disabled={!item.enabled || busy} onClick={() => run(item)}>{busy && selected?.id === item.id ? <RefreshCw size={14} className="spin" /> : 'Run analysis'} <ChevronRight size={14} /></Button></article>)}</div>{result && <section className="panel analysis-detail"><div className="panel-heading"><div><span className="panel-kicker">ANALYSIS RESULT</span><h3>{result.title}</h3><p className="result-context">Field: <b>{result.field || 'dataset'}</b> · Calculation: <b>{result.aggregation || 'profile review'}</b></p></div></div>{result.metrics && <div className="result-metrics">{Object.entries(result.metrics).filter(([, value]) => value !== null && typeof value !== 'object').map(([key, value]) => <div key={key}><span>{key.replaceAll('_', ' ')}</span><b>{typeof value === 'number' ? number(value) : text(value)}</b></div>)}</div>}{points.length > 1 && <MiniChart points={points} />}<Grid columns={columns} rows={rows} /></section>}</div> }
 function Analyst({ data, question, setQuestion, messages, ask, busy }) { return <div className="workspace-page"><Head eyebrow="AI ANALYST / GROUNDED" title="Ask better questions." copy="Pivot investigates the data, executes read-only evidence queries, and explains only what the evidence supports." action={<span className="ai-status"><i /> Evidence mode</span>} /><div className="analyst-layout"><div className="analyst-main"><div className="analyst-intro"><span className="analyst-orb"><Bot size={27} /></span><h2>What would you like to know?</h2><p>Ask about trends, quality, categories, or values in your file.</p></div><div className="suggested-prompts"><button onClick={() => setQuestion('Which values are highest?')}>Which values are highest? <ChevronRight size={14} /></button><button onClick={() => setQuestion('What quality issues should I review?')}>What quality issues should I review? <ChevronRight size={14} /></button><button onClick={() => setQuestion('Show me the trend by month')}>Show me the trend by month <ChevronRight size={14} /></button></div><div className="chat-thread">{messages.length === 0 && <div className="chat-empty"><Bot size={18} /><span>Start a conversation. I’ll keep every question and evidence-backed answer here.</span></div>}{messages.map((message, index) => <div className={`chat-message ${message.role}`} key={`${message.role}-${index}`}><div className="chat-bubble"><div className="answer-head"><span className="analyst-avatar">{message.role === 'user' ? initials(readJson('pivot-personal-profile')) : <Bot size={15} />}</span><b>{message.role === 'user' ? 'You' : 'Pivot Analyst'}</b>{message.source && <Badge tone="green">{message.source}</Badge>}</div>{message.pending ? <p className="chat-pending"><RefreshCw size={14} className="spin" /> Investigating the source…</p> : <><p>{message.text}</p>{message.sql && <><small className="answer-label">EVIDENCE SQL</small><pre>{message.sql}</pre></>}{message.query_result && <div className="answer-result"><CheckCircle2 size={14} /> {number(message.query_result.count)} rows returned · fields: {(message.query_result.columns || []).join(', ')}</div>} {message.role === 'assistant' && <small>Sources: {(message.citations || []).map(source => source.source).join(', ') || data.file_name}</small>}</>}</div></div>)}</div><div className="ask-composer"><textarea value={question} onChange={event => setQuestion(event.target.value)} onKeyDown={event => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); ask() } }} placeholder="Ask anything about your data..." rows="2" /><div><span><Sparkles size={14} /> Grounded in {data.file_name}</span><button onClick={ask} disabled={busy || !question.trim()}>{busy ? <RefreshCw size={14} className="spin" /> : <Send size={16} />}</button></div></div></div><aside className="analyst-aside"><div className="aside-card"><span className="panel-kicker">HOW IT WORKS</span><div className="how-step"><span>1</span><div><b>Understand the schema</b><small>Relevant fields and profile facts are loaded.</small></div></div><div className="how-step"><span>2</span><div><b>Execute evidence</b><small>Queries are validated as read-only.</small></div></div><div className="how-step"><span>3</span><div><b>Explain with evidence</b><small>Answers show the query and returned fields.</small></div></div></div></aside></div></div> }
 function AnalystVisualization({ visualization }) {
-  if (!visualization || visualization.type === 'table') return null
-  if (visualization.type === 'line') return <div className="analyst-visual"><div className="visual-title">{visualization.title}</div><MiniChart points={(visualization.data || []).map(point => ({ label: point.label, value: point.value }))} /></div>
-  const data = visualization.data || []; const max = Math.max(...data.map(point => Number(point.value) || 0), 1)
-  return <div className="analyst-visual"><div className="visual-title">{visualization.title}</div><div className="analyst-bars">{data.slice(0, 12).map(point => <div className="analyst-bar-row" key={point.label}><span title={point.label}>{point.label}</span><i><b style={{ width: `${Math.max(3, (Number(point.value) || 0) / max * 100)}%` }} /></i><strong>{number(point.value)}</strong></div>)}</div></div>
+  if (!visualization || visualization.type === 'table') return null;
+  
+  if (visualization.type === 'line') {
+    return (
+      <div className="analyst-visual" style={{ margin: '15px 0' }}>
+        <div className="visual-title" style={{ fontWeight: '600', fontSize: '13px', color: '#153f36', marginBottom: '10px' }}>
+          {visualization.title}
+        </div>
+        <MiniChart points={(visualization.data || []).map(point => ({ label: point.label, value: point.value }))} />
+      </div>
+    );
+  }
+
+  // Bar Chart using Recharts
+  const data = (visualization.data || []).slice(0, 10).map(p => ({
+    name: p.label,
+    value: Number(p.value) || 0
+  }));
+
+  if (!data.length) return null;
+
+  return (
+    <div className="analyst-visual" style={{ margin: '15px 0' }}>
+      <div className="visual-title" style={{ fontWeight: '600', fontSize: '13px', color: '#153f36', marginBottom: '10px' }}>
+        {visualization.title}
+      </div>
+      <div style={{ height: '220px', width: '100%' }}>
+        <ResponsiveContainer width="100%" height="100%">
+          <BarChart data={data} margin={{ top: 10, right: 10, left: 10, bottom: 20 }}>
+            <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#eef2ee" />
+            <XAxis 
+              dataKey="name" 
+              tick={{ fill: '#7f958b', fontSize: 10 }} 
+              axisLine={{ stroke: '#cbd9cf' }} 
+              tickLine={{ stroke: '#cbd9cf' }}
+              interval={0}
+              tickFormatter={(text) => text.length > 12 ? `${text.substring(0, 10)}...` : text}
+            />
+            <YAxis 
+              tickFormatter={(val) => {
+                if (val >= 1e6) return `${(val / 1e6).toFixed(1)}M`
+                if (val >= 1e3) return `${(val / 1e3).toFixed(1)}K`
+                return val
+              }}
+              tick={{ fill: '#7f958b', fontSize: 10 }}
+              axisLine={{ stroke: '#cbd9cf' }} 
+              tickLine={{ stroke: '#cbd9cf' }}
+            />
+            <Tooltip 
+              contentStyle={{ 
+                background: '#073a31', 
+                border: 'none', 
+                borderRadius: '6px', 
+                color: 'white',
+                fontSize: '11px',
+                fontFamily: 'inherit'
+              }}
+              formatter={(value) => [`${value.toLocaleString()}`, 'Value']}
+            />
+            <Bar dataKey="value" fill="#138463" radius={[4, 4, 0, 0]} barSize={32}>
+              {data.map((entry, index) => (
+                <Cell key={`cell-${index}`} fill={index === 0 ? '#10634c' : '#138463'} />
+              ))}
+            </Bar>
+          </BarChart>
+        </ResponsiveContainer>
+      </div>
+    </div>
+  );
 }
+
 
 function AnalystV2({ data, question, setQuestion, messages, ask, busy }) {
   const userInitials = initials(readJson('pivot-personal-profile'))
@@ -58,15 +124,344 @@ function AnalystV2({ data, question, setQuestion, messages, ask, busy }) {
 
 function SQL({ data, sql, setSql, result, run, busy }) { const [filter, setFilter] = useState(''); const visibleRows = result?.rows?.filter(row => !filter.trim() || Object.values(row).some(value => text(value).toLowerCase().includes(filter.toLowerCase()))) || []; return <div className="workspace-page"><Head eyebrow="SQL / SAFE WORKSPACE" title="Query your data." copy="Use read-only SQL against the normalized dataset table." action={<Badge tone="green"><LockKeyhole size={12} /> Read-only mode</Badge>} /><div className="sql-layout"><div className="sql-editor panel"><div className="editor-bar"><span><Code2 size={15} /> query-01.sql</span><span>SQLite · dataset</span></div><div className="editor-body"><textarea value={sql} onChange={event => setSql(event.target.value)} spellCheck="false" /></div><div className="editor-footer"><span><ShieldCheck size={13} /> Query guard active</span><Button variant="small" onClick={run} disabled={busy}>{busy ? <RefreshCw size={13} className="spin" /> : <Play size={13} fill="currentColor" />} Run query</Button></div></div><div className="sql-help panel"><span className="panel-kicker">DETECTED COLUMNS</span><h3>Use the profile</h3><p>{(data.profile?.columns_list || []).join(', ') || 'No columns detected'}</p><div className="sql-tip"><LockKeyhole size={14} /><span>Only SELECT and WITH statements can run.</span></div></div></div>{result && <div className="panel sql-result"><div className="panel-heading"><div><h3>{number(result.count)} rows returned</h3><small className="result-context">Showing {number(visibleRows.length)} returned rows · search exact results below</small></div><Button variant="outline" onClick={() => downloadText('pivot-query-result.csv', `${result.columns.join(',')}\n${result.rows.map(row => result.columns.map(column => JSON.stringify(row[column] ?? '')).join(',')).join('\n')}`, 'text/csv')}><Download size={14} /> Export CSV</Button></div><label className="result-search"><Search size={14} /><input value={filter} onChange={event => setFilter(event.target.value)} placeholder="Search returned rows..." /></label><Grid columns={result.columns} rows={visibleRows} /></div>}</div> }
 function Reports({ data, refresh }) { const [title, setTitle] = useState('Dataset report'); const [format, setFormat] = useState('md'); const [busy, setBusy] = useState(false); async function generate() { setBusy(true); try { const report = await request(`/api/datasets/${data.dataset_id}/reports`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ title, format }) }); await refresh(data.dataset_id); download(report.download_url); notify('Report generated from live dataset evidence.') } catch (error) { notify(error.message) } finally { setBusy(false) } } return <div className="workspace-page"><Head eyebrow="REPORTS / EXPORT" title="Tell the story." copy="Generate a live report from the current profile, quality findings, and version history." /><section className="report-feature report-feature-polished"><div className="report-preview"><Badge tone="green">LIVE DATASET</Badge><h2>Evidence, shaped into a story.</h2><p>Profile, quality, analysis, and lineage in one export.</p><div className="report-preview-line" /></div><div className="report-copy"><h2>Generate a traceable report</h2><p>No template numbers are used. This report is generated from <b>{data.file_name}</b> at export time.</p><div className="report-form-grid"><label>Report title<input value={title} onChange={event => setTitle(event.target.value)} /></label><label>Format<select value={format} onChange={event => setFormat(event.target.value)}><option value="md">Markdown</option><option value="csv">CSV</option><option value="pdf">PDF</option></select></label></div><Button onClick={generate} disabled={busy}><Download size={15} /> {busy ? 'Generating…' : 'Generate report'}</Button></div></section><section className="report-history panel"><div className="panel-heading"><div><span className="panel-kicker">REPORT HISTORY</span><h3>{data.reports?.length ? 'Generated reports' : 'No reports yet'}</h3></div></div>{(data.reports || []).map(report => <article key={report.id}><span className="report-file-icon"><FileBarChart2 size={17} /></span><div><b>{report.title}</b><small>{report.format.toUpperCase()} · {new Date(report.created_at).toLocaleString()}</small></div><button className="text-button" onClick={() => download(`/api/datasets/${data.dataset_id}/reports/${report.id}/download`)}>Download <ChevronRight size={13} /></button></article>)}</section></div> }
-function Lineage({ data, page, activate }) { const versions = data.versions || []; return <div className="workspace-page"><Head eyebrow={`DATASET / ${page.toUpperCase()}`} title={page === 'Lineage' ? 'See every connection.' : 'Version history'} copy="The original source is preserved. Approved transformations are recorded here." /><div className="lineage-list">{versions.length ? versions.map((version, index) => <div className="lineage-item" key={version.id}><span className={`lineage-node ${index ? 'clean' : 'source'}`}>{index ? <WandSparkles size={16} /> : <Database size={16} />}</span><div className="lineage-detail"><Badge tone={index ? 'green' : 'purple'}>{index ? `VERSION ${version.number}` : 'SOURCE'}</Badge><h3>{index ? version.operation : data.file_name}</h3><p>{version.detail || 'Original source preserved; no changes applied.'}</p></div>{index > 0 && <button className="text-button" onClick={() => activate(version.number)}>Activate</button>}</div>) : <div className="lineage-empty"><GitBranch size={20} /><b>No lineage entries yet.</b><span>Upload a dataset to begin the lineage.</span></div>}</div></div> }
+function formatVersionDetail(detail, operation) {
+  if (!detail) return 'Original source preserved; no changes applied.'
+  if (!detail.startsWith('{')) return detail
+  try {
+    const parsed = JSON.parse(detail)
+    const metrics = parsed.metrics || {}
+    const parts = []
+
+    if (operation.includes('trim_text')) {
+      parts.push(`Trimmed leading/trailing whitespace in text columns.`)
+      if (metrics.affected_rows) parts.push(`Affected rows: ${metrics.affected_rows.toLocaleString()}`)
+    } else if (operation.includes('remove_duplicates')) {
+      parts.push(`Removed duplicate records.`)
+      if (metrics.removed_rows) parts.push(`Removed rows: ${metrics.removed_rows.toLocaleString()}`)
+    } else if (operation.includes('normalize_columns')) {
+      parts.push(`Normalized column headers to SQL-safe snake_case.`)
+      if (metrics.renamed) {
+        const renamedList = Object.entries(metrics.renamed).map(([old, next]) => `${old} → ${next}`).join(', ')
+        parts.push(`Renamed columns: ${renamedList}`)
+      }
+    } else if (operation.includes('parse_dates')) {
+      parts.push(`Intelligently detected and parsed date columns.`)
+      if (metrics.columns && metrics.columns.length) {
+        parts.push(`Date columns standardized: ${metrics.columns.join(', ')}`)
+      }
+    } else if (operation.includes('fill_missing')) {
+      parts.push(`Filled missing values using median/mode strategy.`)
+      if (metrics.filled_values) parts.push(`Filled cells count: ${metrics.filled_values.toLocaleString()}`)
+    } else if (operation.includes('remove_outliers')) {
+      parts.push(`Excluded extreme outliers using 1.5× IQR fence.`)
+      if (metrics.removed_rows) parts.push(`Excluded rows count: ${metrics.removed_rows.toLocaleString()}`)
+    } else if (operation.includes('standardize_format')) {
+      parts.push(`Standardized formats dynamically: unified numeric types, parsed date values, and trimmed text.`)
+      const stats = []
+      if (metrics.trimmed_cells) stats.push(`trimmed ${metrics.trimmed_cells.toLocaleString()} cells`)
+      if (metrics.numeric_cells_normalized) stats.push(`normalized ${metrics.numeric_cells_normalized.toLocaleString()} numbers`)
+      if (metrics.invalid_dates_normalized) stats.push(`parsed ${metrics.invalid_dates_normalized.toLocaleString()} dates`)
+      if (stats.length) parts.push(`Action stats: ${stats.join(', ')}`)
+    } else {
+      parts.push(`Applied operation: ${operation.replaceAll('_', ' ')}`)
+    }
+
+    if (parsed.profile?.quality_score) {
+      parts.push(`Quality Score: ${parsed.profile.quality_score}/100`)
+    }
+
+    return parts.join(' · ')
+  } catch (error) {
+    return detail
+  }
+}
+
+function parseBold(text) {
+  if (typeof text !== 'string') return text;
+  const parts = [];
+  const regex = /\*\*(.*?)\*\*/g;
+  let match;
+  let lastIndex = 0;
+  while ((match = regex.exec(text)) !== null) {
+    if (match.index > lastIndex) {
+      parts.push(text.substring(lastIndex, match.index));
+    }
+    parts.push(<strong key={match.index}>{match[1]}</strong>);
+    lastIndex = regex.lastIndex;
+  }
+  if (lastIndex < text.length) {
+    parts.push(text.substring(lastIndex));
+  }
+  return parts.length > 0 ? parts : text;
+}
+
+function MarkdownText({ content }) {
+  if (!content) return null;
+  const lines = content.split('\n');
+  return (
+    <div className="markdown-content" style={{ fontSize: '12px', color: '#45695c' }}>
+      {lines.map((line, lineIndex) => {
+        const trimmed = line.trim();
+        if (trimmed.startsWith('### ')) {
+          return <h4 key={lineIndex} style={{ margin: '14px 0 6px', color: '#153f36', fontSize: '13px', fontWeight: '600' }}>{parseBold(trimmed.substring(4))}</h4>;
+        }
+        if (trimmed.startsWith('## ')) {
+          return <h3 key={lineIndex} style={{ margin: '16px 0 8px', color: '#153f36', fontSize: '14px', fontWeight: '600' }}>{parseBold(trimmed.substring(3))}</h3>;
+        }
+        if (trimmed.startsWith('* ') || trimmed.startsWith('- ')) {
+          return (
+            <div key={lineIndex} style={{ display: 'flex', gap: '8px', paddingLeft: '8px', margin: '4px 0', alignItems: 'start' }}>
+              <span style={{ color: '#138463' }}>•</span>
+              <div>{parseBold(trimmed.substring(2))}</div>
+            </div>
+          );
+        }
+        const numberedMatch = trimmed.match(/^(\d+)\.\s+(.*)/);
+        if (numberedMatch) {
+          return (
+            <div key={lineIndex} style={{ display: 'flex', gap: '8px', paddingLeft: '8px', margin: '4px 0', alignItems: 'start' }}>
+              <span style={{ color: '#138463', fontWeight: '500' }}>{numberedMatch[1]}.</span>
+              <div>{parseBold(numberedMatch[2])}</div>
+            </div>
+          );
+        }
+        if (trimmed === '') return <div key={lineIndex} style={{ height: '6px' }} />;
+        return <p key={lineIndex} style={{ margin: '6px 0', lineHeight: '1.6' }}>{parseBold(line)}</p>;
+      })}
+    </div>
+  );
+}
+
+function SupportingDataTable({ columns, rows }) {
+  const [expanded, setExpanded] = useState(false);
+  const displayLimit = 5;
+  const hasMore = rows.length > displayLimit;
+  const visibleRows = expanded ? rows : rows.slice(0, displayLimit);
+  return (
+    <div className="supporting-data-wrap" style={{ margin: '12px 0 6px' }}>
+      <Grid columns={columns} rows={visibleRows} />
+      {hasMore && (
+        <button 
+          type="button"
+          className="text-button" 
+          style={{ marginTop: '8px', fontWeight: '500', display: 'flex', alignItems: 'center', gap: '4px', cursor: 'pointer' }}
+          onClick={() => setExpanded(!expanded)}
+        >
+          {expanded ? 'Show less' : `Show all ${rows.length} rows`} <ChevronRight size={13} style={{ transform: expanded ? 'rotate(-90deg)' : 'none', transition: 'transform 0.2s' }} />
+        </button>
+      )}
+    </div>
+  );
+}
+
+function Lineage({ data, page, activate }) {
+  const versions = data.versions || [];
+  return (
+    <div className="workspace-page">
+      <Head
+        eyebrow={`DATASET / ${page.toUpperCase()}`}
+        title={page === 'Lineage' ? 'See every connection.' : 'Version history'}
+        copy="The original source is preserved. Approved transformations are recorded here."
+      />
+      <div className="lineage-list">
+        {versions.length ? (
+          versions.map((version, index) => (
+            <div className="lineage-item" key={version.id}>
+              <span className={`lineage-node ${index ? 'clean' : 'source'}`}>
+                {index ? <WandSparkles size={16} /> : <Database size={16} />}
+              </span>
+              <div className="lineage-detail">
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                  <Badge tone={index ? 'green' : 'purple'}>
+                    {index ? `VERSION ${version.number}` : 'SOURCE'}
+                  </Badge>
+                  <span style={{ fontSize: '9px', color: '#9aa69f' }}>
+                    {new Date(version.created_at).toLocaleString()}
+                  </span>
+                </div>
+                <h3 style={{ textTransform: 'uppercase', letterSpacing: '0.03em' }}>{index ? version.operation.replace('executed:', '').replaceAll('_', ' ') : data.file_name}</h3>
+                <p style={{ marginTop: '8px', color: '#537167', fontSize: '11px', lineHeight: '1.5' }}>
+                  {formatVersionDetail(version.detail, version.operation)}
+                </p>
+              </div>
+              {index > 0 && data.active_version !== version.number && (
+                <button type="button" className="text-button" style={{ alignSelf: 'center', marginLeft: '12px' }} onClick={() => activate(version.number)}>
+                  Activate
+                </button>
+              )}
+              {index > 0 && data.active_version === version.number && (
+                <Badge tone="green" style={{ alignSelf: 'center', marginLeft: '12px' }}>Active</Badge>
+              )}
+            </div>
+          ))
+        ) : (
+          <div className="lineage-empty">
+            <GitBranch size={20} />
+            <b>No lineage entries yet.</b>
+            <span>Upload a dataset to begin the lineage.</span>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function ProfilePage({ profile, save }) { const [draft, setDraft] = useState(profile); const fileInput = useRef(); const update = key => event => setDraft(current => ({ ...current, [key]: event.target.value })); function chooseImage(event) { const file = event.target.files?.[0]; if (!file) return; if (!file.type.startsWith('image/')) return notify('Choose an image file.'); const reader = new FileReader(); reader.onload = () => setDraft(current => ({ ...current, avatar: reader.result })); reader.readAsDataURL(file) } const initialsText = initials(draft); return <div className="workspace-page"><Head eyebrow="ACCOUNT / PERSONAL PROFILE" title="Your profile." copy="These details personalize the workspace, sidebar, avatar, and future reports." action={<Button onClick={() => save(draft)}><Check size={15} /> Save changes</Button>} /><section className="personal-profile-grid"><div className="profile-form-card"><div className="profile-cover"><div className="profile-avatar-large">{draft.avatar ? <img src={draft.avatar} alt="Profile" /> : initialsText}</div><div><h2>{draft.fullName || 'Workspace user'}</h2><p>{draft.role || 'Add your role'}{draft.company ? ` · ${draft.company}` : ''}</p></div></div><div className="form-section"><div className="profile-form-grid"><label>Full name<input value={draft.fullName || ''} onChange={update('fullName')} placeholder="Amelia King" /></label><label>Email address<input type="email" value={draft.email || ''} onChange={update('email')} placeholder="you@company.com" /></label><label>Role / title<input value={draft.role || ''} onChange={update('role')} placeholder="Data lead" /></label><label>Company<input value={draft.company || ''} onChange={update('company')} placeholder="Pivot Labs" /></label><label>Profile image<button type="button" className="file-choose" onClick={() => fileInput.current?.click()}>Choose an image</button><input ref={fileInput} hidden type="file" accept="image/*" onChange={chooseImage} /></label><label>Timezone<select value={draft.timezone || 'Asia/Calcutta'} onChange={update('timezone')}><option>Asia/Calcutta</option><option>UTC</option><option>America/New_York</option><option>Europe/London</option></select></label><label className="full-field">Short bio<textarea value={draft.bio || ''} onChange={update('bio')} rows="4" placeholder="What do you work on?" /></label></div></div></div><aside className="profile-side-column"><div className="account-card"><span className="panel-kicker">ACCOUNT STATUS</span><div className="account-status"><i /> Local account active</div><p>Production authentication and team access will be connected later.</p><div className="account-line"><span>Email</span><b>{draft.email || 'Not set'}</b></div><div className="account-line"><span>Timezone</span><b>{draft.timezone || 'Asia/Calcutta'}</b></div></div><div className="profile-tip"><Sparkles size={17} /><b>Your profile travels with you.</b><p>Saved identity details appear in the avatar, sidebar, and generated report context.</p></div></aside></section></div> }
 function SettingsPage({ data, profile, onReset }) { const [settings, setSettings] = useState(() => ({ grounded: true, emailAlerts: false, compact: false, theme: 'light', ...readJson('pivot-settings') })); const [active, setActive] = useState('general'); function update(key, value) { const next = { ...settings, [key]: value }; setSettings(next); localStorage.setItem('pivot-settings', JSON.stringify(next)); if (key === 'compact') document.body.classList.toggle('compact-tables', value) } function jump(id) { setActive(id); document.getElementById(`setting-${id}`)?.scrollIntoView({ behavior: 'smooth', block: 'start' }) } return <div className="workspace-page"><Head eyebrow="WORKSPACE / SETTINGS" title="Settings that matter." copy="Control how this browser presents and protects your Pivot workspace." /><div className="settings-layout-polished"><aside className="settings-nav-card"><b>Workspace settings</b>{[['general', 'General'], ['ai', 'AI Analyst'], ['notifications', 'Notifications'], ['safeguards', 'Data safeguards']].map(([id, label]) => <button className={active === id ? 'active' : ''} key={id} onClick={() => jump(id)}>{label}<ChevronRight size={12} /></button>)}</aside><div className="settings-panels"><section id="setting-general" className="settings-panel"><span className="panel-kicker">GENERAL</span><h3>Workspace preferences</h3><p>{data.file_name} is your active source.</p><label>Display theme<select value={settings.theme} onChange={event => update('theme', event.target.value)}><option value="light">Light</option><option value="system">System</option></select></label><label className="setting-check"><input type="checkbox" checked={settings.compact} onChange={event => update('compact', event.target.checked)} /> Use compact data tables</label></section><section id="setting-ai" className="settings-panel"><span className="panel-kicker">AI ANALYST</span><h3>Evidence controls</h3><div className="setting-row"><span><b>Grounded evidence mode</b><small>AI answers must use detected schema and executed evidence.</small></span><button className={`toggle ${settings.grounded ? 'on' : ''}`} onClick={() => update('grounded', !settings.grounded)}><i /></button></div><div className="setting-row"><span><b>Model</b><small>Gemini · {settings.grounded ? 'evidence-first' : 'standard explanation'}</small></span><Badge tone="green">Connected</Badge></div></section><section id="setting-notifications" className="settings-panel"><span className="panel-kicker">NOTIFICATIONS</span><h3>Workspace updates</h3><label className="setting-check"><input type="checkbox" checked={settings.emailAlerts} onChange={event => update('emailAlerts', event.target.checked)} /> Notify me about quality findings</label><p className="settings-note">Email delivery will activate when production auth is connected.</p></section><section id="setting-safeguards" className="settings-panel safeguards"><span className="panel-kicker">DATA SAFEGUARDS</span><h3>Always enforced</h3><div className="safeguard-grid"><span><LockKeyhole size={16} /><b>Original preserved</b><small>Source files are never overwritten.</small></span><span><ShieldCheck size={16} /><b>Read-only SQL</b><small>Only SELECT and WITH queries run.</small></span><span><GitBranch size={16} /><b>Versioned cleaning</b><small>Approved changes create new versions.</small></span></div></section><section className="settings-panel danger"><span className="panel-kicker">DATASET SESSION</span><h3>Choose another source</h3><p>This returns to the upload workspace without deleting stored files.</p><Button variant="outline" onClick={onReset}>Choose another dataset</Button></section></div></div></div> }
 
 function AnalystV3({ data, question, setQuestion, messages, ask, busy }) {
   const userInitials = initials(readJson('pivot-personal-profile'))
-  return <div className="workspace-page"><Head eyebrow="AI ANALYST / GROUNDED" title="Ask anything about your data." copy="Answers, actions, exports, and evidence from the active dataset." action={<span className="ai-status"><i /> Evidence mode</span>} /><div className="analyst-layout"><div className="analyst-main"><div className="analyst-intro"><span className="analyst-orb"><Bot size={27} /></span><h2>What would you like to investigate?</h2><p>Ask naturally: “Which product sales are highest?” or “Fix the messy date formats and give me an updated CSV.”</p></div><div className="suggested-prompts"><button onClick={() => setQuestion('Which product sales are highest?')}>Which product sales are highest? <ChevronRight size={14} /></button><button onClick={() => setQuestion('When did sales drop the most, and what changed?')}>When did sales drop the most? <ChevronRight size={14} /></button><button onClick={() => setQuestion('Fix the messy date formats and give me an updated CSV')}>Fix messy formats + export <ChevronRight size={14} /></button></div><div className="chat-thread">{messages.length === 0 && <div className="chat-empty"><Bot size={18} /><span>Start a conversation. I’ll calculate answers from {data.file_name} and keep the supporting evidence here.</span></div>}{messages.map((message, index) => <div className={`chat-message ${message.role}`} key={`${message.role}-${index}`}><div className="chat-bubble"><div className="answer-head"><span className="analyst-avatar">{message.role === 'user' ? userInitials : <Bot size={15} />}</span><b>{message.role === 'user' ? 'You' : 'Pivot Analyst'}</b>{message.source && <Badge tone="green">{message.source}</Badge>}</div>{message.pending ? <p className="chat-pending"><RefreshCw size={14} className="spin" /> Investigating the source…</p> : <><p>{message.text}</p>{message.action?.status === 'approved' && message.download_url && <Button variant="outline" onClick={() => download(message.download_url)}><Download size={14} /> Download updated CSV</Button>}{message.action?.status === 'preview' && <div className="action-note"><WandSparkles size={14} /> Preview ready in Cleaning for review.</div>}{message.insights?.length > 0 && <div className="analyst-insights"><b>What stands out</b>{message.insights.map((insight, insightIndex) => <span key={insightIndex}><CheckCircle2 size={13} />{insight}</span>)}</div>}<AnalystVisualization visualization={message.visualization} />{message.driver_rows?.length > 0 && <><div className="answer-label">ASSOCIATED CHANGE BY GROUP</div><Grid columns={Object.keys(message.driver_rows[0])} rows={message.driver_rows} /></>}{message.query_result?.rows?.length > 0 && <><div className="answer-label">SUPPORTING DATA</div><Grid columns={message.query_result.columns || Object.keys(message.query_result.rows[0])} rows={message.query_result.rows} /></>}{message.sql && <details className="evidence-details"><summary>Show calculation query</summary><pre>{message.sql}</pre></details>}{message.role === 'assistant' && <small>Based on: {(message.citations || []).map(source => source.source).join(', ') || data.file_name}</small>}</>}</div></div>)}</div><div className="ask-composer"><textarea value={question} onChange={event => setQuestion(event.target.value)} onKeyDown={event => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); ask() } }} placeholder="Ask anything about your data..." rows="2" /><div><span><Sparkles size={14} /> Calculated from {data.file_name}</span><button onClick={ask} disabled={busy || !question.trim()}>{busy ? <RefreshCw size={14} className="spin" /> : <Send size={16} />}</button></div></div></div><aside className="analyst-aside"><div className="aside-card"><span className="panel-kicker">HOW IT WORKS</span><div className="how-step"><span>1</span><div><b>Understand the schema</b><small>Relevant dates, metrics, and grouping fields are detected.</small></div></div><div className="how-step"><span>2</span><div><b>Calculate from the source</b><small>Answers use the active dataframe, not invented sample numbers.</small></div></div><div className="how-step"><span>3</span><div><b>Act on the result</b><small>Cleaning requests create a new version and export it without changing the original.</small></div></div></div></aside></div></div>
-}
+  const threadRef = useRef(null)
+  
+  useEffect(() => {
+    if (threadRef.current) {
+      threadRef.current.scrollTop = threadRef.current.scrollHeight
+    }
+  }, [messages, busy])
 
+  return (
+    <div className="workspace-page analyst-page">
+      <Head 
+        eyebrow="AI ANALYST / GROUNDED" 
+        title="Ask anything about your data." 
+        copy="Answers, actions, exports, and evidence from the active dataset." 
+        action={<span className="ai-status"><i /> Evidence mode</span>} 
+      />
+      <div className="analyst-layout">
+        <div className="analyst-main">
+          <div className="analyst-intro">
+            <span className="analyst-orb"><Bot size={27} /></span>
+            <h2>What would you like to investigate?</h2>
+            <p>Ask naturally: “Which product sales are highest?” or “Fix messy date formats and give me an updated CSV.”</p>
+          </div>
+          <div className="suggested-prompts">
+            <button type="button" onClick={() => setQuestion('Which product sales are highest?')}>Which product sales are highest? <ChevronRight size={14} /></button>
+            <button type="button" onClick={() => setQuestion('When did sales drop the most, and what changed?')}>When did sales drop the most? <ChevronRight size={14} /></button>
+            <button type="button" onClick={() => setQuestion('Fix the messy date formats and give me an updated CSV')}>Fix messy formats + export <ChevronRight size={14} /></button>
+          </div>
+          <div className="chat-thread" ref={threadRef}>
+            {messages.length === 0 ? (
+              <div className="chat-empty">
+                <Bot size={18} />
+                <span>Start a conversation. I’ll calculate answers from {data.file_name} and keep the supporting evidence here.</span>
+              </div>
+            ) : (
+              messages.map((message, index) => (
+                <div className={`chat-message ${message.role}`} key={`${message.role}-${index}`}>
+                  <div className="chat-bubble">
+                    <div className="answer-head">
+                      <span className="analyst-avatar">
+                        {message.role === 'user' ? userInitials : <Bot size={15} />}
+                      </span>
+                      <b>{message.role === 'user' ? 'You' : 'Pivot Analyst'}</b>
+                      {message.source && <Badge tone="green">{message.source}</Badge>}
+                    </div>
+                    {message.pending ? (
+                      <p className="chat-pending"><RefreshCw size={14} className="spin" /> Investigating the source…</p>
+                    ) : (
+                      <>
+                        <div style={{ marginTop: '11px' }}>
+                          <MarkdownText content={message.text} />
+                        </div>
+                        {message.action?.status === 'approved' && message.download_url && (
+                          <div style={{ marginTop: '12px' }}>
+                            <Button variant="outline" onClick={() => download(message.download_url)}>
+                              <Download size={14} /> Download updated CSV
+                            </Button>
+                          </div>
+                        )}
+                        {message.action?.status === 'preview' && (
+                          <div className="action-note" style={{ marginTop: '10px', fontSize: '11px', color: '#be653a' }}>
+                            <WandSparkles size={14} style={{ inlineSize: 'auto', display: 'inline', marginRight: '4px' }} /> Preview ready in Cleaning for review.
+                          </div>
+                        )}
+                        {message.insights?.length > 0 && (
+                          <div className="analyst-insights" style={{ marginTop: '12px', background: '#f5faf5', padding: '10px', borderRadius: '6px', border: '1px solid #e0ede0' }}>
+                            <b style={{ fontSize: '10px', color: '#153f36', textTransform: 'uppercase', display: 'block', marginBottom: '6px' }}>What stands out</b>
+                            {message.insights.map((insight, insightIndex) => (
+                              <span key={insightIndex} style={{ display: 'flex', gap: '6px', fontSize: '11px', color: '#3d6356', margin: '4px 0', alignItems: 'center' }}>
+                                <CheckCircle2 size={13} style={{ color: '#138463' }} /> {insight}
+                              </span>
+                            ))}
+                          </div>
+                        )}
+                        <AnalystVisualization visualization={message.visualization} />
+                        {message.driver_rows?.length > 0 && (
+                          <div style={{ marginTop: '12px' }}>
+                            <div className="answer-label" style={{ fontSize: '9px', fontWeight: 'bold', color: '#789087', margin: '8px 0' }}>ASSOCIATED CHANGE BY GROUP</div>
+                            <Grid columns={Object.keys(message.driver_rows[0])} rows={message.driver_rows} />
+                          </div>
+                        )}
+                        {message.query_result?.rows?.length > 0 && (
+                          <div style={{ marginTop: '12px' }}>
+                            <div className="answer-label" style={{ fontSize: '9px', fontWeight: 'bold', color: '#789087', margin: '8px 0' }}>SUPPORTING DATA</div>
+                            <SupportingDataTable columns={message.query_result.columns || Object.keys(message.query_result.rows[0])} rows={message.query_result.rows} />
+                          </div>
+                        )}
+                        {message.sql && (
+                          <details className="evidence-details" style={{ marginTop: '12px' }}>
+                            <summary style={{ fontSize: '11px', cursor: 'pointer', color: '#138463', outline: 'none' }}>Show calculation query</summary>
+                            <pre style={{ background: '#102f29', color: '#d2e9dc', padding: '10px', borderRadius: '6px', fontSize: '10px', overflowX: 'auto', marginTop: '6px' }}>{message.sql}</pre>
+                          </details>
+                        )}
+                        {message.role === 'assistant' && (
+                          <small style={{ display: 'block', fontSize: '9px', color: '#88968f', marginTop: '10px' }}>
+                            Based on: {(message.citations || []).map(source => source.source).join(', ') || data.file_name}
+                          </small>
+                        )}
+                      </>
+                    )}
+                  </div>
+                </div>
+              ))
+            )}
+          </div>
+          <div className="ask-composer">
+            <textarea 
+              value={question} 
+              onChange={event => setQuestion(event.target.value)} 
+              onKeyDown={event => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); ask() } }} 
+              placeholder="Ask anything about your data..." 
+              rows="2" 
+            />
+            <div>
+              <span><Sparkles size={14} /> Calculated from {data.file_name}</span>
+              <button type="button" onClick={ask} disabled={busy || !question.trim()}>
+                {busy ? <RefreshCw size={14} className="spin" /> : <Send size={16} />}
+              </button>
+            </div>
+          </div>
+        </div>
+        <aside className="analyst-aside">
+          <div className="aside-card">
+            <span className="panel-kicker">HOW IT WORKS</span>
+            <div className="how-step">
+              <span>1</span>
+              <div>
+                <b>Understand the schema</b>
+                <small>Relevant dates, metrics, and grouping fields are detected.</small>
+              </div>
+            </div>
+            <div className="how-step">
+              <span>2</span>
+              <div>
+                <b>Calculate from the source</b>
+                <small>Answers use the active dataframe, not invented sample numbers.</small>
+              </div>
+            </div>
+            <div className="how-step">
+              <span>3</span>
+              <div>
+                <b>Act on the result</b>
+                <small>Cleaning requests create a new version and export it without changing the original.</small>
+              </div>
+            </div>
+          </div>
+        </aside>
+      </div>
+    </div>
+  )
+}
 export default function AppPolished() {
   const input = useRef(); const [data, setData] = useState(null); const [overview, setOverview] = useState(null); const [analyses, setAnalyses] = useState([]); const [selected, setSelected] = useState(null); const [page, setPage] = useState('Overview'); const [busy, setBusy] = useState(false); const [chatBusy, setChatBusy] = useState(false); const [message, setMessage] = useState(''); const [toast, setToast] = useState(''); const [profile, setProfile] = useState(() => ({ ...readJson('pivot-personal-profile'), ...readJson('pivot-auth-session') })); const [authMode, setAuthMode] = useState(null); const [transitioning, setTransitioning] = useState(false); const [authenticated, setAuthenticated] = useState(() => Boolean(localStorage.getItem('pivot-auth-session'))); const [restoring, setRestoring] = useState(() => Boolean(localStorage.getItem('pivot-active-dataset'))); const [question, setQuestion] = useState(''); const [messages, setMessages] = useState([]); const [sql, setSql] = useState('SELECT * FROM dataset LIMIT 20'); const [result, setResult] = useState(null); const [preview, setPreview] = useState(null)
   useEffect(() => { const listener = event => { setToast(text(event.detail)); clearTimeout(window.__pivotToastTimer); window.__pivotToastTimer = setTimeout(() => setToast(''), 3000) }; window.addEventListener('pivot:notice', listener); return () => window.removeEventListener('pivot:notice', listener) }, [])

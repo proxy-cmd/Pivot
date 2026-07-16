@@ -2,9 +2,10 @@ from __future__ import annotations
 
 """Dataset-aware question answering used by the Pivot Analyst.
 
-The analyst deliberately calculates answers from the active dataframe. SQL is
-still returned as a transparent, read-only trace, but the user-facing answer
-is a structured result rather than a query-generation demo.
+The analyst calculates answers from the active dataframe. It supports
+conversation memory so follow-up questions ("why?", "tell me more") can
+reference prior answers. The Gemini LLM is used as an intelligent
+fallback for free-form reasoning.
 """
 
 import re
@@ -19,6 +20,8 @@ from .analytics import _numeric_series, forecast
 MONEY_WORDS = ("revenue", "sales", "amount", "price", "cost", "profit", "margin", "total", "value")
 TIME_WORDS = ("month", "monthly", "date", "time", "trend", "year", "quarter", "week", "period", "season")
 GROUP_WORDS = ("product", "category", "region", "country", "customer", "segment", "channel", "department", "store", "city", "state", "brand", "sku", "name")
+WHY_WORDS = ("why", "reason", "cause", "explain", "how come", "what happened", "tell me more", "elaborate", "can you tell", "what changed", "what caused")
+CONVERSATIONAL = ("hi", "hello", "hey", "hiya", "good morning", "good afternoon", "good evening", "thanks", "thank you", "ok", "okay", "got it", "cool", "nice")
 
 
 def quote(identifier: str) -> str:
@@ -40,8 +43,6 @@ def _date_column(frame: pd.DataFrame, profile: dict[str, Any]) -> str | None:
     dates, _ = _schema(profile, frame)
     if dates:
         return dates[0]
-    # A date can be present in a generically named field, so use a conservative
-    # value-based fallback when the profiler did not identify it.
     for column in frame.columns:
         parsed = pd.to_datetime(frame[column], format="mixed", errors="coerce")
         if parsed.notna().mean() >= 0.8 and parsed.nunique(dropna=True) >= 3:
@@ -82,7 +83,6 @@ def _dimension(frame: pd.DataFrame, profile: dict[str, Any], question: str) -> s
         name = _normal(column)
         score = sum(3 for word in GROUP_WORDS if word in name and word in question_text)
         score += sum(1 for word in GROUP_WORDS if word in name)
-        # High-cardinality identifiers are rarely useful as a first grouping.
         unique_ratio = frame[column].nunique(dropna=True) / max(len(frame), 1)
         if unique_ratio > 0.9:
             score -= 2
@@ -124,7 +124,149 @@ def _base(profile: dict[str, Any], frame: pd.DataFrame) -> dict[str, Any]:
     }
 
 
-def answer_question(question: str, frame: pd.DataFrame, profile: dict[str, Any]) -> dict[str, Any]:
+def _is_why_question(question: str) -> bool:
+    """Check if the question is asking for an explanation of a previous result."""
+    normalized = _normal(question)
+    return any(phrase in normalized for phrase in WHY_WORDS)
+
+
+def _is_followup(question: str) -> bool:
+    """Check if this is a short follow-up that references prior context."""
+    normalized = _normal(question)
+    words = normalized.split()
+    if len(words) <= 6:
+        return True
+    followup_signals = ("it", "that", "this", "those", "the result", "above",
+                        "previous", "last answer", "you said", "you mentioned",
+                        "more detail", "more about", "dig deeper")
+    return any(signal in normalized for signal in followup_signals)
+
+
+def _build_why_analysis(frame: pd.DataFrame, profile: dict[str, Any],
+                         question: str, history: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """Try to build a data-driven 'why' explanation from the prior answer context."""
+    base = _base(profile, frame)
+    date_column = _date_column(frame, profile)
+    metric = _metric(frame, profile, question)
+    dimension = _dimension(frame, profile, question)
+
+    # Look for the most recent assistant message with actual data
+    prior_answer = None
+    prior_data = None
+    for entry in reversed(history or []):
+        if entry.get("role") == "assistant" and entry.get("text"):
+            prior_answer = entry["text"]
+            prior_data = entry.get("data", {})
+            break
+
+    if not prior_answer:
+        return None
+
+    # Try to build a breakdown analysis to explain "why"
+    if date_column and metric and dimension:
+        try:
+            parsed = pd.to_datetime(frame[date_column], format="mixed", errors="coerce")
+            values = _numeric_series(frame, metric)
+            frame_copy = frame.copy()
+            frame_copy["__date"] = parsed
+            frame_copy["__metric"] = values
+            frame_copy["__year"] = parsed.dt.year
+
+            # Group by dimension and time to find what drove changes
+            yearly = frame_copy.groupby(["__year", dimension])["__metric"].sum().reset_index()
+            yearly.columns = ["year", "group", "value"]
+            yearly = yearly.dropna()
+
+            if len(yearly) >= 2:
+                # Find biggest movers
+                pivot = yearly.pivot_table(index="group", columns="year", values="value", aggfunc="sum").fillna(0)
+                if pivot.shape[1] >= 2:
+                    years = sorted(pivot.columns)
+                    pivot["change"] = pivot[years[-1]] - pivot[years[-2]]
+                    pivot["change_pct"] = ((pivot["change"] / pivot[years[-2]].replace(0, pd.NA)) * 100).round(1)
+                    top_drivers = pivot.sort_values("change", ascending=False).head(5)
+                    bottom_drivers = pivot.sort_values("change").head(5)
+
+                    driver_rows = []
+                    for group_name, row in top_drivers.iterrows():
+                        driver_rows.append({
+                            "group": str(group_name),
+                            f"{years[-2]}": round(float(row[years[-2]]), 2),
+                            f"{years[-1]}": round(float(row[years[-1]]), 2),
+                            "change": round(float(row["change"]), 2),
+                            "change_%": f"{row['change_pct']:.1f}%" if pd.notna(row["change_pct"]) else "N/A"
+                        })
+
+                    decline_rows = []
+                    for group_name, row in bottom_drivers.iterrows():
+                        if row["change"] < 0:
+                            decline_rows.append({
+                                "group": str(group_name),
+                                f"{years[-2]}": round(float(row[years[-2]]), 2),
+                                f"{years[-1]}": round(float(row[years[-1]]), 2),
+                                "change": round(float(row["change"]), 2),
+                                "change_%": f"{row['change_pct']:.1f}%" if pd.notna(row["change_pct"]) else "N/A"
+                            })
+
+                    # Build explanation
+                    top_grower = driver_rows[0] if driver_rows else None
+                    top_decliner = decline_rows[0] if decline_rows else None
+
+                    explanation_parts = [
+                        f"Looking at {metric} broken down by {dimension} between {years[-2]} and {years[-1]}:"
+                    ]
+                    if top_grower:
+                        explanation_parts.append(
+                            f"• The biggest growth came from **{top_grower['group']}** "
+                            f"(+{top_grower['change']:,.2f}, {top_grower['change_%']})."
+                        )
+                    if top_decliner:
+                        explanation_parts.append(
+                            f"• The largest decline was in **{top_decliner['group']}** "
+                            f"({top_decliner['change']:,.2f}, {top_decliner['change_%']})."
+                        )
+
+                    if len(driver_rows) > 1:
+                        other_growers = [r["group"] for r in driver_rows[1:3] if r["change"] > 0]
+                        if other_growers:
+                            explanation_parts.append(
+                                f"• Other notable growth areas: {', '.join(other_growers)}."
+                            )
+
+                    explanation_parts.append(
+                        "\nNote: This analysis shows correlation in the data. "
+                        "The actual business reasons (promotions, market changes, etc.) "
+                        "would need domain knowledge to confirm."
+                    )
+
+                    answer = "\n".join(explanation_parts)
+
+                    chart_data = []
+                    for group_name, row in top_drivers.head(8).iterrows():
+                        chart_data.append({"label": str(group_name), "value": round(float(row["change"]), 2)})
+
+                    return {
+                        "answer": answer,
+                        "insights": [
+                            f"Analyzed {metric} by {dimension} across {len(years)} periods.",
+                            f"Top driver: {top_grower['group']} with {top_grower['change']:+,.2f} change." if top_grower else "No clear top driver found.",
+                        ],
+                        "visualization": _chart("bar", f"Change in {metric} by {dimension} ({years[-2]}→{years[-1]})", chart_data) if chart_data else None,
+                        "rows": driver_rows[:10],
+                        "driver_rows": decline_rows[:8] if decline_rows else [],
+                        "sql": f"SELECT {quote(dimension)}, SUM(CASE WHEN strftime('%Y',{quote(date_column)})='{years[-2]}' THEN {quote(metric)} END) AS prev, SUM(CASE WHEN strftime('%Y',{quote(date_column)})='{years[-1]}' THEN {quote(metric)} END) AS curr FROM dataset GROUP BY {quote(dimension)} ORDER BY (curr-prev) DESC LIMIT 20",
+                        "intent": "why_analysis",
+                        "evidence": base | {"metric": metric, "dimension": dimension, "date_column": date_column},
+                    }
+        except Exception:
+            pass
+
+    return None
+
+
+def answer_question(question: str, frame: pd.DataFrame, profile: dict[str, Any],
+                     history: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    """Answer a data question. Accepts conversation history for follow-up context."""
     question = question.strip()
     normalized = _normal(question)
     lower = normalized.split()
@@ -133,12 +275,44 @@ def answer_question(question: str, frame: pd.DataFrame, profile: dict[str, Any])
     metric = _metric(frame, profile, question)
     dimension = _dimension(frame, profile, question)
     base = _base(profile, frame)
+    history = history or []
 
+    # --- Greetings ---
     if normalized in {"hi", "hello", "hey", "hiya", "good morning", "good afternoon", "good evening"}:
-        return {"answer": f"Hi! I’m Pivot Analyst. I’ve loaded {len(frame):,} rows across {len(frame.columns)} columns. Ask me about trends, products, regions, quality, or any numeric field.", "insights": [], "visualization": None, "rows": [], "sql": None, "intent": "conversation", "evidence": base}
-    if any(phrase in normalized for phrase in ("who are you", "what can you do", "what are you")):
-        return {"answer": "I’m Pivot Analyst. I inspect the active dataset, calculate answers from its actual values, show the supporting records or chart, and explain what the evidence does—and does not—show.", "insights": [], "visualization": None, "rows": [], "sql": None, "intent": "conversation", "evidence": base}
+        return {"answer": f"Hi! I'm Pivot Analyst. I've loaded {len(frame):,} rows across {len(frame.columns)} columns. Ask me about trends, products, regions, quality, or any numeric field — I'll calculate the answer and show you the evidence.", "insights": [], "visualization": None, "rows": [], "sql": None, "intent": "conversation", "evidence": base}
 
+    if any(phrase in normalized for phrase in ("who are you", "what can you do", "what are you")):
+        return {"answer": "I'm Pivot Analyst — your AI data analyst. I can analyze trends, find top/bottom performers, explain what changed and why, detect quality issues, calculate aggregates, find correlations, forecast future values, and even clean your data. Just ask naturally!", "insights": [], "visualization": None, "rows": [], "sql": None, "intent": "conversation", "evidence": base}
+
+    if normalized in {"thanks", "thank you", "ok", "okay", "got it", "cool", "nice", "great", "perfect", "awesome"}:
+        return {"answer": "You're welcome! Ask me anything else about your data — I'm here to help.", "insights": [], "visualization": None, "rows": [], "sql": None, "intent": "conversation", "evidence": base}
+
+    # --- "Why" / Explanation questions (uses conversation history) ---
+    if _is_why_question(question) and history:
+        why_result = _build_why_analysis(frame, profile, question, history)
+        if why_result:
+            return why_result
+        # If we can't build a deterministic why-analysis, signal to use Gemini
+        # Gather prior context for the LLM
+        prior_texts = []
+        for entry in history[-6:]:
+            role = entry.get("role", "")
+            text = entry.get("text", "")
+            if text:
+                prior_texts.append(f"{role}: {text}")
+        context_summary = "\n".join(prior_texts)
+        return {
+            "answer": "",
+            "insights": [],
+            "visualization": None,
+            "rows": [],
+            "sql": None,
+            "intent": "needs_gemini",
+            "evidence": base,
+            "conversation_context": context_summary,
+        }
+
+    # --- Quality questions ---
     if any(word in normalized for word in ("quality", "missing", "duplicate", "duplicates", "clean", "messy", "null")):
         issues = profile.get("issues", [])
         if not issues:
@@ -148,6 +322,7 @@ def answer_question(question: str, frame: pd.DataFrame, profile: dict[str, Any])
             answer = f"I found {len(issues)} quality finding(s): {details}. Review these before using the data for final reporting."
         return {"answer": answer, "insights": [issue["impact"] for issue in issues[:4]], "visualization": None, "rows": issues, "sql": "SELECT * FROM dataset LIMIT 1", "intent": "quality", "evidence": base | {"issues": issues}}
 
+    # --- Correlation ---
     if any(word in normalized for word in ("correlation", "correlate", "relationship", "related")) and len(numeric) >= 2:
         correlations = frame[numeric].apply(lambda values: _numeric_series(frame, values.name)).corr().fillna(0)
         pairs = []
@@ -159,6 +334,7 @@ def answer_question(question: str, frame: pd.DataFrame, profile: dict[str, Any])
         answer = f"The strongest observed relationship is between {strongest['field_1']} and {strongest['field_2']} (correlation {strongest['correlation']:.3f}). Correlation is association, not proof that one field causes the other." if strongest else "There are not enough complete numeric fields to calculate a relationship."
         return {"answer": answer, "insights": [], "visualization": None, "rows": pairs[:20], "sql": "SELECT * FROM dataset LIMIT 200", "intent": "correlation", "evidence": base}
 
+    # --- Forecast ---
     if any(word in normalized for word in ("forecast", "predict", "projection", "future")) and date_column and metric:
         periods, cadence = _period_values(frame, date_column, metric, question)
         projection = forecast(periods["value"].tolist())
@@ -171,6 +347,7 @@ def answer_question(question: str, frame: pd.DataFrame, profile: dict[str, Any])
         answer = f"The {cadence} projection for {metric} is {', '.join(f'{label}: {value:,.2f}' for label, value in zip(future_labels, projection['forecast']))}. This is a {projection['confidence']} confidence linear trend projection, not a causal prediction."
         return {"answer": answer, "insights": [projection.get("assumption", "")], "visualization": _chart("line", f"{metric} forecast", [{"label": row["period"], "value": row["value"]} for row in rows]), "rows": rows, "sql": "SELECT * FROM dataset LIMIT 200", "intent": "forecast", "evidence": base | {"metric": metric, "date_column": date_column}}
 
+    # --- Outlier / Anomaly detection ---
     if any(word in normalized for word in ("outlier", "outliers", "unusual", "anomaly", "anomalies")) and metric:
         values = _numeric_series(frame, metric)
         clean = values.dropna()
@@ -182,11 +359,13 @@ def answer_question(question: str, frame: pd.DataFrame, profile: dict[str, Any])
         rows = json_safe_rows(flagged.head(50).to_dict(orient="records"))
         return {"answer": f"I found {len(flagged):,} unusual {metric} records using the 1.5× IQR rule. These are candidates for review, not automatic errors.", "insights": [f"Typical range: {q1:,.2f} to {q3:,.2f}; flagged values are outside the IQR fence."], "visualization": None, "rows": rows, "sql": f"SELECT * FROM dataset WHERE {quote(metric)} < {float(q1 - 1.5 * iqr)} OR {quote(metric)} > {float(q3 + 1.5 * iqr)} LIMIT 200", "intent": "anomaly", "evidence": base | {"metric": metric}}
 
+    # --- Row count ---
     if any(word in normalized for word in ("how many rows", "row count", "number of rows", "how many records", "records are")):
         count = len(frame)
         return {"answer": f"The active dataset contains {count:,} rows and {len(frame.columns):,} columns.", "insights": [], "visualization": None, "rows": [{"rows": count, "columns": len(frame.columns)}], "sql": "SELECT COUNT(*) AS rows FROM dataset", "intent": "profile", "evidence": base}
 
-    drop_question = any(word in normalized for word in ("drop", "dropped", "decline", "declined", "fell", "fall", "decrease", "decreased", "worst month", "lowest month"))
+    # --- Drop / Decline analysis ---
+    drop_question = any(word in normalized for word in ("drop", "dropped", "decline", "declined", "fell", "fall", "decrease", "decreased", "worst month", "lowest month", "went down", "low"))
     if drop_question and date_column and metric:
         periods, cadence = _period_values(frame, date_column, metric, question)
         periods["previous"] = periods["value"].shift(1).round(2)
@@ -221,6 +400,7 @@ def answer_question(question: str, frame: pd.DataFrame, profile: dict[str, Any])
         sql = f"SELECT strftime('%Y-%m', {quote(date_column)}) AS period, SUM({quote(metric)}) AS value FROM dataset GROUP BY period ORDER BY period"
         return {"answer": answer, "insights": insights, "visualization": _chart("line", f"{cadence.title()} {metric}", chart_data), "rows": rows, "driver_rows": driver_rows, "sql": sql, "intent": "change", "evidence": base | {"date_column": date_column, "metric": metric}}
 
+    # --- Time-based trend ---
     if date_column and metric and any(word in normalized for word in TIME_WORDS):
         periods, cadence = _period_values(frame, date_column, metric, question)
         peak = periods.loc[periods["value"].idxmax()]
@@ -230,7 +410,8 @@ def answer_question(question: str, frame: pd.DataFrame, profile: dict[str, Any])
         sql = f"SELECT strftime('%Y-%m', {quote(date_column)}) AS period, SUM({quote(metric)}) AS value FROM dataset GROUP BY period ORDER BY period"
         return {"answer": answer, "insights": [f"The highest period is {peak['period']}.", f"The lowest period is {low['period']}.", f"Average per period: {periods['value'].mean():,.2f}."] , "visualization": _chart("line", f"{cadence.title()} {metric}", [{"label": str(row["period"]), "value": float(row["value"])} for _, row in periods.iterrows()]), "rows": rows, "sql": sql, "intent": "trend", "evidence": base | {"date_column": date_column, "metric": metric}}
 
-    grouped_question = any(word in normalized for word in ("by", "per", "each", "which", "top", "highest", "most", "best", "lowest", "bottom", "compare"))
+    # --- Grouped / comparison questions ---
+    grouped_question = any(word in normalized for word in ("by", "per", "each", "which", "top", "highest", "most", "best", "lowest", "bottom", "compare", "biggest", "largest", "smallest"))
     if grouped_question and metric and dimension:
         values = frame.copy()
         values["__metric"] = _numeric_series(values, metric)
@@ -245,6 +426,7 @@ def answer_question(question: str, frame: pd.DataFrame, profile: dict[str, Any])
         sql = f"SELECT {quote(dimension)} AS group_name, SUM({quote(metric)}) AS value, COUNT(*) AS rows FROM dataset GROUP BY {quote(dimension)} ORDER BY value {'DESC' if descending else 'ASC'} LIMIT 20"
         return {"answer": answer, "insights": [f"The top group represents {top['value'] / grouped['value'].sum() * 100:.1f}% of the displayed group total."], "visualization": _chart("bar", f"{metric} by {dimension}", [{"label": row["group"], "value": row["value"]} for row in rows]), "rows": rows, "sql": sql, "intent": "breakdown", "evidence": base | {"dimension": dimension, "metric": metric}}
 
+    # --- Simple aggregates ---
     if metric and any(word in normalized for word in ("sum", "total", "revenue", "sales", "amount", "average", "mean", "median", "maximum", "minimum", "max", "min")):
         values = _numeric_series(frame, metric).dropna()
         if len(values):
@@ -266,7 +448,38 @@ def answer_question(question: str, frame: pd.DataFrame, profile: dict[str, Any])
             sql = f"SELECT {sql_operation}({quote(metric)}) AS value FROM dataset" if sql_operation else f"SELECT * FROM dataset LIMIT 200"
             return {"answer": f"The {operation} {metric} is {value:,.2f}, calculated from {len(values):,} usable values.", "insights": [f"Usable values: {len(values):,}; missing or non-numeric values excluded: {len(frame) - len(values):,}."], "visualization": None, "rows": [{"metric": metric, "operation": operation, "value": round(value, 2)}], "sql": sql, "intent": "aggregate", "evidence": base | {"metric": metric}}
 
-    sample = frame.head(20).fillna("")
-    rows = sample.to_dict(orient="records")
+    # --- Fallback: route to Gemini for free-form questions ---
+    # Instead of dumping frame.head(20), signal that Gemini should handle this
     fields = ", ".join(str(column) for column in frame.columns[:8])
-    return {"answer": f"I can investigate this dataset, but I couldn’t map that request to a reliable calculation yet. Available fields include {fields}. Try asking for a trend, total, average, top product/category, largest drop, quality issues, or correlation.", "insights": [], "visualization": _chart("table", "Dataset preview", [{"label": str(index + 1), "value": 1} for index in range(min(len(rows), 20))]), "rows": rows, "sql": "SELECT * FROM dataset LIMIT 20", "intent": "clarification", "evidence": base}
+
+    # Build a data summary for the LLM instead of raw rows
+    data_summary = {
+        "columns": [str(c) for c in frame.columns],
+        "rows": int(len(frame)),
+        "numeric_fields": numeric,
+        "date_fields": dates,
+        "sample_values": {}
+    }
+    for col in frame.columns[:10]:
+        sample = frame[col].dropna().head(3).tolist()
+        data_summary["sample_values"][str(col)] = [str(v) for v in sample]
+
+    # Gather conversation context
+    prior_texts = []
+    for entry in (history or [])[-6:]:
+        role = entry.get("role", "")
+        txt = entry.get("text", "")
+        if txt:
+            prior_texts.append(f"{role}: {txt}")
+
+    return {
+        "answer": "",
+        "insights": [],
+        "visualization": None,
+        "rows": [],
+        "sql": None,
+        "intent": "needs_gemini",
+        "evidence": base | {"data_summary": data_summary},
+        "conversation_context": "\n".join(prior_texts),
+        "available_fields": fields,
+    }

@@ -368,8 +368,19 @@ def preview_transformation(dataset_id: str, operation: str):
     transformation = get_transformation(transformation_id)
     preview_path = Path(transformation['preview_path'])
     preview_path.write_text(clean.to_csv(index=False), encoding='utf-8')
-    before_preview = json.loads(source.head(8).fillna('').to_json(orient='records'))
-    after_preview = json.loads(clean.head(8).fillna('').to_json(orient='records'))
+    before_preview = json.loads(
+    source.head(8)
+    .astype(object)
+    .where(source.head(8).notna(), None)
+    .to_json(orient="records")
+)
+
+    after_preview = json.loads(
+    clean.head(8)
+    .astype(object)
+    .where(clean.head(8).notna(), None)
+    .to_json(orient="records")
+)
     return {'id': transformation_id, 'operation': operation, 'metrics': metrics, 'rows_before': len(source), 'rows_after': len(clean), 'before': {'rows': len(source), 'columns': [str(column) for column in source.columns], 'preview': before_preview}, 'after': {'rows': len(clean), 'columns': [str(column) for column in clean.columns], 'preview': after_preview}, 'before_preview': before_preview, 'after_preview': after_preview, 'source_unchanged': True}
 
 

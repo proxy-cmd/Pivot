@@ -66,10 +66,12 @@ def profile_frame(frame: pd.DataFrame, filename: str) -> dict[str, Any]:
     total = max(rows * max(cols, 1), 1)
     date_cols = []
     for column in frame.columns:
-        if any(word in column for word in DATE_WORDS):
-            parsed = pd.to_datetime(frame[column], errors='coerce')
-            if parsed.notna().sum() >= max(2, int(frame[column].notna().sum() * 0.2)):
-                date_cols.append(column)
+        parsed = pd.to_datetime(frame[column], format='mixed', errors='coerce')
+        non_null = max(int(frame[column].notna().sum()), 1)
+        named_date = any(word in column for word in DATE_WORDS)
+        value_date = not pd.api.types.is_numeric_dtype(frame[column]) and parsed.notna().sum() >= max(3, int(non_null * 0.8)) and parsed.nunique(dropna=True) >= 3
+        if named_date and parsed.notna().sum() >= max(2, int(non_null * 0.2)) or value_date:
+            date_cols.append(column)
     ids = [column for column in frame.columns if column.endswith('_id') or any(word in column for word in ID_WORDS)]
     numeric = []
     for column in frame.columns:
@@ -119,7 +121,7 @@ def profile_frame(frame: pd.DataFrame, filename: str) -> dict[str, Any]:
         column_stats.append(stats)
     invalid_dates = 0
     for column in date_cols:
-        parsed = pd.to_datetime(frame[column], errors='coerce')
+        parsed = pd.to_datetime(frame[column], format='mixed', errors='coerce')
         invalid_dates += int(parsed.isna().sum() - frame[column].isna().sum())
     negatives = 0
     for column in numeric:
@@ -128,7 +130,8 @@ def profile_frame(frame: pd.DataFrame, filename: str) -> dict[str, Any]:
             negatives += int((numeric_values < 0).sum())
     outliers = 0
     if rows >= 12 and numeric:
-        sample = pd.DataFrame({column: _numeric_series(frame, column) for column in numeric}).replace([np.inf, -np.inf], np.nan).dropna()
+        source = frame.sample(min(rows, 10000), random_state=42) if rows > 10000 else frame
+        sample = pd.DataFrame({column: _numeric_series(source, column) for column in numeric}).replace([np.inf, -np.inf], np.nan).dropna()
         if len(sample) >= 12:
             outliers = int((IsolationForest(contamination=0.05, random_state=42).fit_predict(sample) == -1).sum())
     issues = []

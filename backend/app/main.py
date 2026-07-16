@@ -14,6 +14,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
+from .assistant import answer_question
 from .analytics import _numeric_series, forecast, prepare_frame, profile_frame, scenario
 from .config import get_settings
 from .models import AnalysisRequest, ChatRequest, ReportRequest, ScenarioRequest, SqlAskRequest, SqlRequest, TransformRequest
@@ -509,7 +510,7 @@ def run_scenario(body: ScenarioRequest):
     return scenario(body.price_change, body.marketing_change, body.cost_change, body.baseline_revenue)
 
 
-@app.post('/api/chat')
+@app.post('/api/chat-legacy')
 def chat(body: ChatRequest):
     if not body.dataset_id:
         return {'answer': 'Upload a dataset before asking the analyst to investigate.', 'source': 'guardrail', 'citations': []}
@@ -563,6 +564,35 @@ def chat(body: ChatRequest):
         detail = f" The first evidence rows are: {sample}." if sample else ''
         return {'answer': f"I found evidence in {item['name']} and returned {query_result.get('count', 0)} matching rows.{detail}", 'source': 'deterministic-evidence', 'sql': query, 'query_result': query_result, 'citations': sources}
     return {'answer': f"Hi — I’m connected to {item['name']}. I found {profile.get('rows', 0)} rows and {profile.get('columns', 0)} detected fields. Ask me about trends, quality, categories, or values and I’ll investigate the source.", 'source': 'dataset-aware', 'sql': query, 'citations': sources}
+
+
+@app.post('/api/chat')
+def chat_v2(body: ChatRequest):
+    """Answer in analyst format: prose, insights, chart data and evidence rows."""
+    if not body.dataset_id:
+        return {'answer': 'Upload a dataset before asking the analyst to investigate.', 'source': 'guardrail', 'citations': []}
+    item = _dataset_or_404(body.dataset_id)
+    profile = item.get('profile') or {}
+    result = answer_question(body.question, _read_source(item), profile)
+    rows = result.get('rows') or []
+    columns = list(rows[0].keys()) if rows else []
+    query_result = {'columns': columns, 'rows': rows[:200], 'count': len(rows)} if rows else None
+    retrieved = retrieve(body.question, chunks_for(body.dataset_id))
+    citations = [{'source': item['name'], 'score': 1.0}]
+    citations.extend({'source': value['source'], 'score': value['score']} for value in retrieved)
+    return {
+        'answer': result['answer'],
+        'source': 'pivot-analyst',
+        'intent': result.get('intent'),
+        'sql': result.get('sql'),
+        'query_result': query_result,
+        'rows': rows[:200],
+        'insights': result.get('insights', []),
+        'driver_rows': result.get('driver_rows', []),
+        'visualization': result.get('visualization'),
+        'evidence': result.get('evidence', {}),
+        'citations': citations,
+    }
 
 
 @app.post('/api/datasets/{dataset_id}/reports')

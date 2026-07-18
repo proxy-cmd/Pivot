@@ -153,7 +153,8 @@ Track every modification while preserving the original uploaded file.
 
 ### AI
 
-- Google Gemini (Optional)
+- Google Gemini API (Runtime)
+- OpenAI GPT-5.5 & GPT-5.6 (Luna & Terra) for development, debugging, code review, and implementation assistance
 - TF-IDF Retrieval
 - Retrieval-Augmented Generation (RAG)
 

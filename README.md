@@ -1,189 +1,149 @@
 # Pivot
 
-> **Business Intelligence with Memory**
+> AI-powered Business Intelligence platform for exploring, cleaning, and analyzing datasets.
 
-Pivot is an AI-powered Data Intelligence Platform that transforms raw structured data into explainable, reproducible business insights. Instead of acting as another dashboard or chatbot, Pivot understands datasets, builds semantic knowledge, detects quality issues, records every transformation, and helps users analyze data using natural language, SQL, and deterministic analytical pipelines.
+Pivot is an AI-powered Business Intelligence platform that helps users understand their data without writing repetitive code.
 
-The goal is simple: eliminate repetitive analytical work while keeping every decision transparent, traceable, and under the user's control.
+Upload a **CSV** or **Excel** file, and Pivot automatically profiles the dataset, detects quality issues, generates insights, and lets you explore the data using natural language or SQL.
 
----
-
-# Core Philosophy
-
-Pivot follows one principle:
-
-> **The uploaded dataset becomes the center of the entire workspace.**
-
-The original file is never modified.
-
-Instead, Pivot creates an intelligent workspace around it by generating metadata, profiling statistics, semantic understanding, quality reports, lineage, version history, retrieval indexes, and AI context.
-
-Every page inside the application is generated from the active dataset—not from hardcoded dashboards or placeholder content.
+Instead of modifying the uploaded dataset, Pivot preserves the original file and creates new versions whenever transformations are applied, making every change traceable and reproducible.
 
 ---
 
-# Current Capabilities
+## Features
 
-## Dataset Management
+### 📂 Upload & Profile
 
-- Upload CSV, Excel, JSON and Parquet datasets.
-- Preserve original files as immutable source-of-truth.
-- Create isolated dataset workspaces.
-- Automatic schema discovery.
-- Dataset fingerprinting.
-- Version-aware processing.
-
----
-
-## Intelligent Profiling
-
-Automatically detects:
-
-- Column data types
-- Date fields
-- Numeric measures
-- Monetary values
-- Candidate primary keys
-- Candidate foreign keys
-- Missing values
-- Unique counts
-- Business entities
-- Semantic meaning
-- Confidence scores
-- Column statistics
+- Upload CSV and Excel datasets
+- Automatic schema detection
+- Column profiling
+- Missing value analysis
+- Duplicate detection
+- Statistical summaries
+- Dataset overview
 
 ---
 
-## Data Quality Engine
+### 🧹 Data Cleaning
 
-Automatically identifies:
+Preview and apply common cleaning operations.
 
-- Missing values
-- Duplicate records
-- Invalid dates
-- Mixed data formats
-- Outliers
-- Negative values
-- Whitespace issues
-- Inconsistent categories
-- Encoding problems
-- Potential data quality risks
+Current transformations include:
 
-Each issue includes severity, explanation, business impact, and suggested fixes.
-
----
-
-## Metadata & Lineage
-
-Every dataset maintains:
-
-- Metadata profile
-- Event history
-- Version history
-- Transformation lineage
-- Dataset fingerprints
-- Processing logs
-
-Nothing is modified automatically.
-
-Every transformation requires approval and remains fully traceable.
-
----
-
-## Safe Transformations
-
-Current transformation pipeline supports:
-
-- Trim text
+- Trim whitespace
 - Remove duplicates
-- Normalize names
 - Parse dates
-- Fill missing values with type-aware defaults
-- Review and remove numeric outliers
+- Fill missing values
+- Normalize text
+- Detect outliers
 
-Every operation is previewed first. Approved transformations create a new dataset version while preserving the original source.
-
----
-
-## AI Analyst
-
-The analyst is an evidence-first question-answering layer, not an SQL generator. It detects the relevant date, metric, and grouping fields, calculates the result from the active dataframe, and returns:
-
-- A plain-English answer
-- Key observations and limitations
-- A line or bar visualization when the question supports one
-- Supporting result rows and associated group changes
-- A safe read-only SQL trace that can be inspected or reproduced
-
-The analyst can also act on explicit cleaning requests. For example, “fix the invalid date formats and give me an updated CSV” creates a new version, normalizes parseable dates, preserves the original file, and returns a download action. Uncertain values are left blank rather than guessed. Outlier removal remains preview-first because extreme values can be legitimate business events.
-
-Built-in analysis works without an API key for common questions such as totals, averages, trends, rankings, largest period drops, quality findings, and correlations. Optional Gemini support provides a natural-language fallback for questions the deterministic analyst cannot map confidently.
+Every transformation creates a new dataset version while keeping the original file unchanged.
 
 ---
 
-## SQL Workspace
+### 🤖 AI Analyst
 
-Pivot includes a secure SQL execution layer.
+Pivot includes an AI-powered chatbot that understands your dataset using a **Retrieval-Augmented Generation (RAG)** pipeline.
+
+Instead of answering from general knowledge, Pivot retrieves the most relevant dataset context before generating a response, making answers grounded in your uploaded data.
+
+You can ask questions like:
+
+> Which region generated the highest revenue?
+
+> Show monthly sales trends.
+
+> Which products are underperforming?
+
+> Find duplicate customer records.
+
+> Fill missing values and generate a cleaned dataset.
+
+> Explain why sales dropped in March.
+
+Depending on the request, Pivot can:
+
+- Answer questions about the dataset
+- Generate charts and summaries
+- Identify trends and anomalies
+- Compare metrics across categories
+- Detect data quality issues
+- Suggest and apply data cleaning operations
+- Create new dataset versions
+- Generate read-only SQL queries
+- Explain how results were calculated
+
+When deterministic analysis isn't sufficient, Gemini can be used as an optional fallback while remaining grounded through the RAG retrieval pipeline.
+
+---
+
+### 🧠 Retrieval-Augmented Generation (RAG)
+
+For every uploaded dataset, Pivot builds a searchable knowledge base using dataset metadata, profiling information, and processed content.
+
+When a question is asked, the system:
+
+1. Retrieves the most relevant dataset context.
+2. Combines it with metadata and profiling information.
+3. Sends only the relevant context to the AI model.
+4. Generates a grounded response based on the retrieved data.
+
+This approach reduces hallucinations and keeps responses focused on the uploaded dataset rather than relying on general knowledge.
+
+---
+
+### 📊 Analytics
+
+Generate:
+
+- KPI summaries
+- Trend analysis
+- Rankings
+- Correlation analysis
+- Forecasting
+- Business Health Score
+- Scenario Analysis
+- Anomaly Detection
+
+---
+
+### 🗄 SQL Workspace
+
+Run SQL directly on the uploaded dataset.
 
 Supported:
 
-- Read-only `SELECT`
-- Common Table Expressions (`WITH`)
+- `SELECT`
+- `WITH` (CTEs)
 
 Blocked:
 
-- INSERT
-- UPDATE
-- DELETE
-- DROP
-- ALTER
-- CREATE
-- Multi-statement execution
+- `INSERT`
+- `UPDATE`
+- `DELETE`
+- `DROP`
+- `ALTER`
+- `CREATE`
 
 ---
 
-## Analytics
+### 📝 Version History
 
-Current analytical capabilities include:
+Every approved transformation creates a new dataset version.
 
-- KPI summaries
-- Business health scoring
-- Trend analysis
-- Grouped rankings and breakdowns
-- Period-over-period change analysis
-- Observed driver comparisons for time drops
-- Correlation analysis
-- Forecasting from detected time series
-- IQR-based anomaly review
-- Confidence intervals
-- Scenario simulation
-- Anomaly detection
+Track every modification while preserving the original uploaded file.
 
 ---
 
-## Live Experience
+## Tech Stack
 
-The application supports:
+### Frontend
 
-- Live analysis events
-- Streaming AI responses
-- Dataset-aware workspace
-- Real-time progress updates
-
----
-
-# Technology Stack
-
-## Frontend
-
-- React JSX
+- React
 - Vite
 - Recharts
-- Custom CSS workspace UI
 
----
-
-## Backend
+### Backend
 
 - FastAPI
 - Pandas
@@ -191,76 +151,54 @@ The application supports:
 - Scikit-learn
 - SQLite
 
----
+### AI
 
-## AI
-
-- Google Gemini (optional)
+- Google Gemini (Optional)
 - TF-IDF Retrieval
 - Retrieval-Augmented Generation (RAG)
 
 ---
 
-# Architecture
+## Project Structure
 
 ```text
-                     User Upload
-                          │
-                          ▼
-                 Dataset Workspace
-                          │
-      ┌───────────────────┼───────────────────┐
-      ▼                   ▼                   ▼
- Metadata Engine    Quality Engine      SQLite Store
-      │                   │                   │
-      └──────────────┬────┴───────────────────┘
-                     ▼
-             Semantic Understanding
-                     │
-      ┌──────────────┼────────────────┐
-      ▼              ▼                ▼
-  AI Analyst     SQL Engine      Analytics
-      │              │                │
-      └──────────────┼────────────────┘
-                     ▼
-              Reports & Insights
+frontend/
+backend/
+sample-data/
 ```
 
 ---
 
-# Running Locally
+## Getting Started
 
-## Backend
+### Backend
 
-```powershell
+```bash
 python -m venv .venv
 
-.\.venv\Scripts\Activate.ps1
+# Windows
+.venv\Scripts\activate
 
 pip install -r backend/requirements.txt
-
-Copy-Item backend/.env.example backend/.env
 
 python -m uvicorn backend.app.main:app --reload
 ```
 
----
+### Frontend
 
-## Frontend
-
-```powershell
+```bash
 npm install
 
 npm run dev
 ```
 
-Frontend:
+Frontend
 
 ```
 http://localhost:5173
 ```
 
-Backend API:
+Backend API
 
 ```
 http://localhost:8000/docs
@@ -268,28 +206,7 @@ http://localhost:8000/docs
 
 ---
 
-## Sample Dataset
-
-For demonstration purposes:
-
-```
-sample-data/retail-orders.csv
-```
-
-This dataset showcases:
-
-- Sales
-- Customers
-- Products
-- Regions
-- Shipping
-- Semantic profiling
-- Quality analysis
-- AI querying
-
----
-
-## Gemini Configuration
+## Environment Variables
 
 Create:
 
@@ -297,63 +214,39 @@ Create:
 backend/.env
 ```
 
-Add:
+Add your Gemini API key (optional):
 
 ```env
 GEMINI_API_KEY=your_api_key
 ```
 
-The API key is used only on the backend.
-
-Never expose it to the frontend.
-
 ---
 
-# Testing
+## Roadmap
 
-Run backend tests:
-
-```powershell
-pytest backend/tests
-```
-
-GitHub Actions automatically executes:
-
-- Backend tests
-- Production web build
-
-for every push and pull request.
-
----
-
-# Roadmap
-
-Upcoming work includes:
-
-- Dynamic dataset-driven dashboards
-- AI-generated analytical workflows
-- Interactive Cleaning Studio
-- Version comparison
-- Advanced lineage graph
-- Report builder
-- Natural-language SQL
+- Authentication & user accounts
 - Multi-user workspaces
-- Scheduled reports
+- Interactive dashboards
+- Advanced lineage visualization
 - Database connectors
-- Cloud storage integrations
-- Vector database support
-- Enterprise authentication
-- Role-based access control
-- Audit logs
-- Background workers
+- Scheduled reports
 - Workflow automation
+- Cloud storage support
+- Enterprise RBAC
 
 ---
 
-# Vision
+## Built With
 
-Pivot is not another dashboard.
+- React
+- FastAPI
+- Pandas
+- SQLite
+- Scikit-learn
+- Gemini API
 
-It is a Business Intelligence Platform that understands data before analyzing it.
+---
 
-Every uploaded dataset becomes an intelligent workspace with memory, semantic understanding, explainable AI, reproducible transformations, and traceable decision-making—allowing users to spend less time preparing data and more time making decisions.
+## License
+
+MIT License.

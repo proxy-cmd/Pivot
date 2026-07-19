@@ -16,6 +16,7 @@ from fastapi.staticfiles import StaticFiles
 
 from .assistant import answer_question
 from .analytics import _numeric_series, forecast, prepare_frame, profile_frame, scenario
+from .autopilot import briefing_markdown, build_report, clean_frame, explore, plan_prompt
 from .config import get_settings
 from .models import AnalysisRequest, ChatRequest, ReportRequest, ScenarioRequest, SqlAskRequest, SqlRequest, TransformRequest
 from .pipeline import apply
@@ -298,6 +299,70 @@ def overview(dataset_id: str):
 def analyses(dataset_id: str):
     item = _dataset_or_404(dataset_id)
     return {'analyses': _analyses(_read_source(item), item['profile'] or {})}
+
+
+@app.post('/api/datasets/{dataset_id}/autopilot')
+def run_autopilot(dataset_id: str):
+    """Run the safe, local-first one-click analysis workflow."""
+    item = _dataset_or_404(dataset_id)
+    source = _read_source(item)
+    cleaned, steps = clean_frame(source)
+    cleaned_profile = _profile_payload(cleaned, item['name'], dataset_id)
+    facts = explore(cleaned, cleaned_profile)
+    plan = None
+    if settings.gemini_api_key:
+        plan = extract_json(call_gemini(plan_prompt(cleaned_profile, facts)) or '')
+    report = build_report(cleaned, cleaned_profile, steps, plan, facts)
+
+    version_number = len(item['versions'])
+    output = FILES / f'{dataset_id}_version_{version_number}_autopilot.csv'
+    cleaned.to_csv(output, index=False)
+    detail = {
+        'output': str(output),
+        'source_unchanged': True,
+        'metrics': {'rows_before': len(source), 'rows_after': len(cleaned), 'steps': steps},
+        'profile': cleaned_profile,
+        'autopilot': report,
+    }
+    version_id = add_version(dataset_id, 'auto_pilot', json.dumps(detail))
+    activate_dataset_version(dataset_id, str(output), cleaned_profile)
+
+    briefing = briefing_markdown(item['name'], report, cleaned_profile)
+    briefing_path = FILES / f'{dataset_id}_auto-pilot-briefing.md'
+    briefing_path.write_text(briefing, encoding='utf-8')
+    report_id = add_report(dataset_id, 'Auto Pilot briefing', 'md', str(briefing_path))
+
+    return {
+        **report,
+        'profile': cleaned_profile,
+        'version': version_number,
+        'version_id': version_id,
+        'download_url': f'/api/datasets/{dataset_id}/versions/{version_number}/download',
+        'briefing_url': f'/api/datasets/{dataset_id}/reports/{report_id}/download',
+        'source_unchanged': True,
+    }
+
+
+@app.get('/api/datasets/{dataset_id}/autopilot')
+def latest_autopilot(dataset_id: str):
+    item = _dataset_or_404(dataset_id)
+    for version in reversed(item['versions']):
+        if version['operation'] != 'auto_pilot':
+            continue
+        detail = json.loads(version['detail'])
+        report = detail.get('autopilot')
+        if report:
+            briefing = next((entry for entry in reports_for(dataset_id) if entry['title'] == 'Auto Pilot briefing'), None)
+            return {
+                **report,
+                'profile': detail.get('profile', item.get('profile')),
+                'version': version['number'],
+                'version_id': version['id'],
+                'download_url': f"/api/datasets/{dataset_id}/versions/{version['number']}/download",
+                'briefing_url': f"/api/datasets/{dataset_id}/reports/{briefing['id']}/download" if briefing else None,
+                'source_unchanged': True,
+            }
+    return {'report': None}
 
 
 @app.post('/api/datasets/{dataset_id}/analyses/run')

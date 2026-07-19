@@ -1,6 +1,7 @@
 import pytest
 import pandas as pd
 from backend.app.analytics import forecast, prepare_frame, profile_frame, scenario
+from backend.app.autopilot import briefing_markdown, build_report, clean_frame
 from backend.app.assistant import answer_question
 from backend.app.rag import chunks, retrieve
 from backend.app.security import validate_readonly_sql
@@ -75,3 +76,23 @@ def test_standardize_format_normalizes_dates_text_and_numbers():
     assert cleaned.loc[0, 'product'] == 'A'
     assert cleaned.loc[0, 'sales'] == 1200
     assert metrics['invalid_dates_normalized'] == 1
+
+
+def test_autopilot_creates_a_safe_retail_briefing_without_mutating_source():
+    source = pd.DataFrame({
+        'Order Date': ['2025/01/01', '2025/02/01', '2025/03/01', '2025/03/01'],
+        'Order ID': ['A-1', 'A-2', 'A-3', 'A-3'],
+        'Region': [' North ', 'South', 'South', 'South'],
+        'Sales': ['$100', '$150', '$200', '$200'],
+        'Profit': [20, 30, 40, 40],
+    })
+    cleaned, steps = clean_frame(prepare_frame(source))
+    profile = profile_frame(cleaned, 'retail.csv')
+    report = build_report(cleaned, profile, steps)
+
+    assert len(source) == 4
+    assert len(cleaned) == 3
+    assert report['domain']['name'] == 'Dataset analysis'
+    assert report['kpis']
+    assert report['insights']
+    assert 'Pivot Auto Pilot briefing' in briefing_markdown('retail.csv', report, profile)

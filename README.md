@@ -12,6 +12,24 @@ Instead of modifying the uploaded dataset, Pivot preserves the original file and
 
 ## Features
 
+### Auto Pilot
+
+Auto Pilot turns a new dataset into a complete first-pass briefing with one action.
+
+It first runs a safe local analysis across usable numeric fields, dimensions, time series, distributions, correlations, and quality risks. When `GEMINI_API_KEY` is configured, it makes one compact planning call using this calculated schema context to select the most useful analysis focus, KPIs, charts, and next checks. Pivot validates every selected field and calculates every displayed number locally.
+
+Each run:
+
+- Standardizes safe formats, removes exact duplicates, and normalizes headers
+- Creates and activates a traceable cleaned dataset version
+- Preserves the original upload unchanged
+- Produces KPI cards, trends, comparisons, distributions, findings, and analysis coverage
+- Creates a downloadable Markdown executive briefing
+
+Auto Pilot does not automatically fill missing values or remove outliers because those changes need business review. Without a Gemini key, it still completes the local investigation and uses the detected dataset structure as its plan.
+
+---
+
 ### 📂 Upload & Profile
 
 - Upload CSV and Excel datasets
@@ -231,7 +249,7 @@ GEMINI_API_KEY=your_api_key
 - Advanced lineage visualization
 - Database connectors
 - Scheduled reports
-- Workflow automation
+- Scheduled workflow automation
 - Cloud storage support
 - Enterprise RBAC
 

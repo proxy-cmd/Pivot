@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
 
@@ -24,7 +25,9 @@ def connect():
     conn = sqlite3.connect(DB)
     conn.row_factory = sqlite3.Row
     conn.executescript('''
-    CREATE TABLE IF NOT EXISTS datasets (id TEXT PRIMARY KEY, name TEXT, source_path TEXT, active_path TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP, profile TEXT, status TEXT);
+    CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, google_id TEXT NOT NULL UNIQUE, email TEXT NOT NULL UNIQUE, full_name TEXT NOT NULL, avatar_url TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP, updated_at TEXT DEFAULT CURRENT_TIMESTAMP, last_login TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS refresh_sessions (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, token_hash TEXT NOT NULL UNIQUE, expires_at TEXT NOT NULL, user_agent TEXT, ip_address TEXT, parent_id TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP, revoked_at TEXT, FOREIGN KEY(user_id) REFERENCES users(id));
+    CREATE TABLE IF NOT EXISTS datasets (id TEXT PRIMARY KEY, owner_user_id TEXT, name TEXT, source_path TEXT, active_path TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP, profile TEXT, status TEXT, FOREIGN KEY(owner_user_id) REFERENCES users(id));
     CREATE TABLE IF NOT EXISTS versions (id TEXT PRIMARY KEY, dataset_id TEXT, number INTEGER, parent_id TEXT, operation TEXT, detail TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP);
     CREATE TABLE IF NOT EXISTS chunks (id TEXT PRIMARY KEY, dataset_id TEXT, source TEXT, content TEXT, metadata TEXT);
     CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY AUTOINCREMENT, dataset_id TEXT, kind TEXT, message TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP);
@@ -35,7 +38,63 @@ def connect():
     if 'active_path' not in columns:
         conn.execute('ALTER TABLE datasets ADD COLUMN active_path TEXT')
         conn.execute('UPDATE datasets SET active_path=source_path WHERE active_path IS NULL')
+    if 'owner_user_id' not in columns:
+        conn.execute('ALTER TABLE datasets ADD COLUMN owner_user_id TEXT')
+    conn.execute('CREATE INDEX IF NOT EXISTS idx_datasets_owner ON datasets(owner_user_id)')
+    conn.execute('CREATE INDEX IF NOT EXISTS idx_refresh_sessions_token ON refresh_sessions(token_hash)')
+    conn.execute('CREATE INDEX IF NOT EXISTS idx_refresh_sessions_user ON refresh_sessions(user_id)')
     return conn
+
+
+def _current_user_id() -> str:
+    from .auth import current_user_id
+    user_id = current_user_id.get()
+    if not user_id:
+        raise RuntimeError('A user context is required for data access.')
+    return user_id
+
+
+def get_user(user_id: str):
+    with connect() as db:
+        row = db.execute('SELECT * FROM users WHERE id=?', (user_id,)).fetchone()
+        return dict(row) if row else None
+
+
+def upsert_google_user(google_id: str, email: str, full_name: str, avatar_url: str | None):
+    now = datetime.now(UTC).isoformat()
+    with connect() as db:
+        existing = db.execute('SELECT id FROM users WHERE google_id=?', (google_id,)).fetchone()
+        if existing:
+            db.execute('UPDATE users SET email=?, full_name=?, avatar_url=?, updated_at=?, last_login=? WHERE id=?', (email.lower(), full_name, avatar_url, now, now, existing['id']))
+            user_id = existing['id']
+        else:
+            user_id = uuid4().hex
+            db.execute('INSERT INTO users(id,google_id,email,full_name,avatar_url,last_login) VALUES(?,?,?,?,?,?)', (user_id, google_id, email.lower(), full_name, avatar_url, now))
+    return get_user(user_id)
+
+
+def create_refresh_session(user_id: str, token_hash: str, expires_at: str, user_agent: str, ip_address: str | None, parent_id: str | None = None):
+    with connect() as db:
+        db.execute('INSERT INTO refresh_sessions(id,user_id,token_hash,expires_at,user_agent,ip_address,parent_id) VALUES(?,?,?,?,?,?,?)', (uuid4().hex, user_id, token_hash, expires_at, user_agent, ip_address, parent_id))
+
+
+def consume_refresh_session(token_hash: str):
+    now = datetime.now(UTC).isoformat()
+    with connect() as db:
+        row = db.execute('SELECT s.*, u.id AS user_id, u.google_id, u.email, u.full_name, u.avatar_url, u.created_at AS user_created_at, u.updated_at AS user_updated_at, u.last_login FROM refresh_sessions s JOIN users u ON u.id=s.user_id WHERE s.token_hash=? AND s.revoked_at IS NULL AND s.expires_at>?', (token_hash, now)).fetchone()
+        if not row:
+            return None
+        db.execute('UPDATE refresh_sessions SET revoked_at=? WHERE id=? AND revoked_at IS NULL', (now, row['id']))
+        if db.total_changes != 1:
+            return None
+        item = dict(row)
+        item['user'] = {'id': item['user_id'], 'google_id': item['google_id'], 'email': item['email'], 'full_name': item['full_name'], 'avatar_url': item['avatar_url'], 'created_at': item['user_created_at'], 'updated_at': item['user_updated_at'], 'last_login': item['last_login']}
+        return item
+
+
+def revoke_refresh_session(token_hash: str):
+    with connect() as db:
+        db.execute('UPDATE refresh_sessions SET revoked_at=? WHERE token_hash=? AND revoked_at IS NULL', (datetime.now(UTC).isoformat(), token_hash))
 
 
 def event(dataset_id: str, kind: str, message: str):
@@ -50,7 +109,7 @@ def create_dataset(name: str, suffix: str, raw: bytes) -> str:
     path = FILES / f'{dataset_id}{suffix}'
     path.write_bytes(raw)
     with connect() as db:
-        db.execute('INSERT INTO datasets(id,name,source_path,active_path,status) VALUES(?,?,?,?,?)', (dataset_id, name, str(path), str(path), 'processing'))
+        db.execute('INSERT INTO datasets(id,owner_user_id,name,source_path,active_path,status) VALUES(?,?,?,?,?,?)', (dataset_id, _current_user_id(), name, str(path), str(path), 'processing'))
     event(dataset_id, 'ingest', 'Source file stored unchanged as version 0.')
     return dataset_id
 
@@ -65,7 +124,7 @@ def finish_dataset(dataset_id: str, profile: dict):
 
 def get_dataset(dataset_id: str):
     with connect() as db:
-        row = db.execute('SELECT * FROM datasets WHERE id=?', (dataset_id,)).fetchone()
+        row = db.execute('SELECT * FROM datasets WHERE id=? AND owner_user_id=?', (dataset_id, _current_user_id())).fetchone()
         if not row: return None
         item = dict(row); item['source_path'] = absolute_path(item.get('source_path')); item['active_path'] = absolute_path(item.get('active_path')); item['profile'] = json.loads(item['profile']) if item['profile'] else None
         profile = item.get('profile') or {}

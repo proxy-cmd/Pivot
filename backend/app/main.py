@@ -9,15 +9,18 @@ from pathlib import Path
 from typing import Any
 
 import pandas as pd
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, StreamingResponse
+from starlette.middleware.sessions import SessionMiddleware
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from .assistant import answer_question
 from .analytics import _numeric_series, forecast, prepare_frame, profile_frame, scenario
 from .autopilot import briefing_markdown, build_report, clean_frame, explore, plan_prompt
 from .config import get_settings
+from .auth import authenticate_request, current_user_id
+from .auth_routes import router as auth_router
 from .models import AnalysisRequest, ChatRequest, ReportRequest, ScenarioRequest, SqlAskRequest, SqlRequest, TransformRequest
 from .pipeline import apply
 from .rag import extract, retrieve
@@ -27,10 +30,31 @@ from .store import (
     events_for, finish_dataset, get_dataset, get_transformation, reports_for, resolve_transformation, activate_dataset_version,
 )
 
-app = FastAPI(title='Pivot Analytics API', version='1.1.0')
+app = FastAPI(title='Pivot Analytics API', version='1.2.0')
 settings = get_settings()
-cors_origins = sorted({origin.strip() for origin in settings.cors_origins.split(',') if origin.strip()} | {'http://localhost:5173', 'http://127.0.0.1:5173'})
+cors_origins = sorted({origin.strip() for origin in settings.cors_origins.split(',') if origin.strip()})
+app.add_middleware(SessionMiddleware, secret_key=settings.jwt_secret or 'development-only-oauth-state-secret', https_only=settings.cookie_secure, same_site='lax')
 app.add_middleware(CORSMiddleware, allow_origins=cors_origins, allow_credentials=True, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Authorization'])
+app.include_router(auth_router)
+
+
+@app.middleware('http')
+async def authentication_middleware(request: Request, call_next):
+    path = request.url.path
+    if request.method == 'OPTIONS' or path in {'/health', '/docs', '/openapi.json', '/redoc'} or path.startswith('/api/auth/'):
+        return await call_next(request)
+    if not path.startswith('/api/'):
+        return await call_next(request)
+    try:
+        user = authenticate_request(request)
+    except HTTPException as error:
+        return JSONResponse({'detail': error.detail}, status_code=error.status_code, headers=error.headers)
+    request.state.user = user
+    token = current_user_id.set(user['id'])
+    try:
+        return await call_next(request)
+    finally:
+        current_user_id.reset(token)
 
 MAX_UPLOAD_BYTES = 25 * 1024 * 1024
 ALLOWED_SUFFIXES = {'.csv', '.xlsx', '.xls', '.json', '.parquet'}

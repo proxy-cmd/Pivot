@@ -11,6 +11,7 @@
   },
   "dependencies": {
     "@vitejs/plugin-react": "latest",
+    "axios": "^1.7.9",
     "lucide-react": "latest",
     "recharts": "latest",
     "react": "latest",

@@ -95,3 +95,25 @@ def test_private_api_routes_hide_cross_user_resources(isolated_store, monkeypatc
     assert owner_response.status_code == 200
     intruder_response = client.get(f'/api/datasets/{dataset_id}', headers={'Authorization': f"Bearer {issue_access_token(intruder['id'])}"})
     assert intruder_response.status_code == 404
+
+
+def test_business_context_is_attached_only_to_the_dataset_owner(isolated_store, monkeypatch):
+    monkeypatch.setenv('JWT_SECRET', 'test-jwt-secret-that-is-long-enough')
+    monkeypatch.setenv('GOOGLE_CLIENT_ID', 'test-client')
+    monkeypatch.setenv('GOOGLE_CLIENT_SECRET', 'test-secret')
+    get_settings.cache_clear()
+    owner = create_user('context-owner', 'context-owner@example.test')
+    dataset_id, _, _ = create_owned_resources(owner)
+
+    from backend.app.main import app
+
+    client = TestClient(app)
+    response = client.post(
+        f'/api/datasets/{dataset_id}/context',
+        headers={'Authorization': f"Bearer {issue_access_token(owner['id'])}"},
+        files={'file': ('glossary.md', b'Active customer means an order in the last 45 days.', 'text/markdown')},
+    )
+    assert response.status_code == 200
+    assert response.json()['chunks'] == 1
+    with user_scope(owner['id']):
+        assert any('Active customer' in item['content'] for item in store.chunks_for(dataset_id))

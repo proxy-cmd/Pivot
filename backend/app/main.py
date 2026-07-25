@@ -27,7 +27,7 @@ from .rag import extract, retrieve
 from .security import validate_readonly_sql
 from .store import (
     FILES, add_chunks, add_report, add_version, chunks_for, create_dataset, create_transformation,
-    events_for, finish_dataset, get_dataset, get_transformation, reports_for, resolve_transformation, activate_dataset_version,
+    event as record_event, events_for, finish_dataset, get_dataset, get_transformation, reports_for, resolve_transformation, activate_dataset_version,
 )
 
 app = FastAPI(title='Pivot Analytics API', version='1.2.0')
@@ -57,7 +57,9 @@ async def authentication_middleware(request: Request, call_next):
         current_user_id.reset(token)
 
 MAX_UPLOAD_BYTES = 25 * 1024 * 1024
+MAX_CONTEXT_BYTES = 5 * 1024 * 1024
 ALLOWED_SUFFIXES = {'.csv', '.xlsx', '.xls', '.json', '.parquet'}
+CONTEXT_SUFFIXES = {'.pdf', '.txt', '.md', '.json'}
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -323,6 +325,29 @@ def overview(dataset_id: str):
 def analyses(dataset_id: str):
     item = _dataset_or_404(dataset_id)
     return {'analyses': _analyses(_read_source(item), item['profile'] or {})}
+
+
+@app.post('/api/datasets/{dataset_id}/context')
+async def add_dataset_context(dataset_id: str, file: UploadFile = File(...)):
+    """Attach a business glossary or data dictionary to a dataset's RAG context."""
+    _dataset_or_404(dataset_id)
+    if not file.filename:
+        raise HTTPException(400, 'A context file name is required.')
+    suffix = Path(file.filename).suffix.lower()
+    if suffix not in CONTEXT_SUFFIXES:
+        raise HTTPException(415, 'Context files must be PDF, TXT, Markdown, or JSON.')
+    raw = await file.read(MAX_CONTEXT_BYTES + 1)
+    if len(raw) > MAX_CONTEXT_BYTES:
+        raise HTTPException(413, 'Context files must be 5MB or smaller.')
+    try:
+        parts = extract(file.filename, raw)
+    except Exception as error:
+        raise HTTPException(422, f'Could not read context file: {error}') from error
+    if not parts:
+        raise HTTPException(422, 'The context file contains no readable text.')
+    add_chunks(dataset_id, file.filename, parts)
+    record_event(dataset_id, 'context', f'Business context attached: {file.filename} ({len(parts)} chunks).')
+    return {'source': file.filename, 'chunks': len(parts)}
 
 
 @app.post('/api/datasets/{dataset_id}/autopilot')

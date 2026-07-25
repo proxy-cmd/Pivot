@@ -18,7 +18,7 @@ def extract(filename: str, raw: bytes) -> list[str]:
         from pypdf import PdfReader
         text = '\n'.join(page.extract_text() or '' for page in PdfReader(BytesIO(raw)).pages)
         return chunks(text)
-    if lower.endswith('.json'):
+    if lower.endswith(('.json', '.md', '.txt')):
         return chunks(raw.decode('utf-8', errors='ignore'))
     return []
 

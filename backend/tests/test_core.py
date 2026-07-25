@@ -3,7 +3,7 @@ import pandas as pd
 from backend.app.analytics import forecast, prepare_frame, profile_frame, scenario
 from backend.app.autopilot import briefing_markdown, build_report, clean_frame
 from backend.app.assistant import answer_question
-from backend.app.rag import chunks, retrieve
+from backend.app.rag import chunks, extract, retrieve
 from backend.app.security import validate_readonly_sql
 from backend.app.pipeline import apply
 
@@ -20,6 +20,11 @@ def test_scenario_moves_with_price():
 def test_rag_retrieves_matching_source():
     result = retrieve('what is revenue', [{'source': 'sales.csv', 'content': 'Revenue was 120000 dollars in June.'}])
     assert result[0]['source'] == 'sales.csv'
+
+
+def test_rag_extracts_business_glossary_text():
+    result = extract('business-glossary.md', b'# Terms\nActive customer means an order in the last 45 days.')
+    assert result and 'Active customer' in result[0]
 
 
 def test_sql_blocks_writes():

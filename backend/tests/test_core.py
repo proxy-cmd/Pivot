@@ -96,3 +96,22 @@ def test_autopilot_creates_a_safe_retail_briefing_without_mutating_source():
     assert report['kpis']
     assert report['insights']
     assert 'Pivot Auto Pilot briefing' in briefing_markdown('retail.csv', report, profile)
+
+
+def test_autopilot_never_displays_model_written_findings():
+    frame = prepare_frame(pd.DataFrame({
+        'order_date': ['2025-01-01', '2025-02-01'],
+        'region': ['North', 'South'],
+        'sales': [100, 200],
+    }))
+    profile = profile_frame(frame, 'sales.csv')
+    report = build_report(frame, profile, [], {
+        'metric': 'sales',
+        'dimension': 'region',
+        'date': 'order_date',
+        'findings': ['Unverified claim that must never reach a customer.'],
+        'headline': 'Unverified headline that must never reach a customer.',
+    })
+
+    text = ' '.join(item['text'] for item in report['insights']) + report['headline']
+    assert 'Unverified' not in text

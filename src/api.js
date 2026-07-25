@@ -1,6 +1,8 @@
 import axios from 'axios'
 
-const baseURL = (import.meta.env.VITE_API_URL || 'http://localhost:8000').replace(/\/$/, '')
+// A relative URL keeps the packaged app on the same origin as the API. Vite
+// proxies it locally; VITE_API_URL is only needed for a separately hosted API.
+const baseURL = (import.meta.env.VITE_API_URL || '').replace(/\/$/, '')
 let accessToken = null
 let refreshPromise = null
 
@@ -63,5 +65,23 @@ export async function request(path, options = {}) {
   } catch (error) {
     if (!error.response) throw new Error('Cannot reach the Pivot API. Start it with "npm run api".')
     throw new Error(error.response.data?.detail || `Request failed (${error.response.status}).`)
+  }
+}
+
+export async function downloadFile(path) {
+  try {
+    const response = await api.get(path, { responseType: 'blob' })
+    const disposition = response.headers['content-disposition'] || ''
+    const match = disposition.match(/filename="?([^";]+)"?/i)
+    const link = document.createElement('a')
+    link.href = URL.createObjectURL(response.data)
+    link.download = match?.[1] || 'pivot-download'
+    document.body.appendChild(link)
+    link.click()
+    link.remove()
+    URL.revokeObjectURL(link.href)
+  } catch (error) {
+    if (!error.response) throw new Error('Cannot reach the Pivot API. Start it with "npm run api".')
+    throw new Error(error.response.data?.detail || `Download failed (${error.response.status}).`)
   }
 }

@@ -1,10 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Activity, AlertCircle, BarChart3, Bell, Bot, Check, CheckCircle2, ChevronDown, ChevronRight, Code2, Database, Download, FileBarChart2, GitBranch, LayoutDashboard, LineChart, LockKeyhole, Menu, Play, RefreshCw, Rocket, Search, Send, Settings2, ShieldCheck, Sparkles, Table2, UserRound, WandSparkles, X } from 'lucide-react'
 import { Area, AreaChart, Bar, BarChart, CartesianGrid, Cell, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
-import { request } from './api'
+import { downloadFile, request } from './api'
 import { useAuth } from './auth'
 
-const API = (import.meta.env.VITE_API_URL || 'http://localhost:8000').replace(/\/$/, '')
+const API = (import.meta.env.VITE_API_URL || '').replace(/\/$/, '')
 const NAV = [['Overview', LayoutDashboard], ['Auto Pilot', Rocket], ['Profile', Table2], ['Quality', ShieldCheck], ['Cleaning', WandSparkles], ['Analysis', BarChart3], ['AI Analyst', Bot], ['SQL', Code2], ['Reports', FileBarChart2], ['Versions', GitBranch], ['Lineage', Activity], ['My Profile', UserRound]]
 const text = value => value && typeof value === 'object' ? JSON.stringify(value) : String(value ?? '')
 const number = value => typeof value === 'number' ? value.toLocaleString(undefined, { maximumFractionDigits: 2 }) : String(value ?? '—')
@@ -13,7 +13,7 @@ const initials = profile => (profile.fullName || profile.name || 'Pivot User').s
 
 function notify(message) { window.dispatchEvent(new CustomEvent('pivot:notice', { detail: text(message) })) }
 function normalizeDataset(item) { const profile = item?.profile || item || {}; return { ...item, profile, dataset_id: item?.id || item?.dataset_id, file_name: item?.name || profile.file_name || item?.file_name || 'Untitled dataset', rows: profile.rows ?? item?.rows ?? 0, columns: profile.columns ?? item?.columns ?? 0, quality_score: profile.quality_score ?? item?.quality_score ?? 0 } }
-function download(url) { window.open(url.startsWith('http') ? url : `${API}${url}`, '_blank', 'noopener,noreferrer') }
+async function download(url) { await downloadFile(url.startsWith('http') ? url : `${API}${url}`) }
 function downloadText(name, content, type = 'application/json') { const link = document.createElement('a'); link.href = URL.createObjectURL(new Blob([content], { type })); link.download = name; link.click(); URL.revokeObjectURL(link.href) }
 function Logo({ light = false }) { return <div className={`logo ${light ? 'logo-light' : ''}`}><span className="logo-mark"><i /><i /></span><b>PIVOT</b></div> }
 function Button({ children, variant = 'primary', onClick, disabled = false, type = 'button' }) { return <button type={type} className={`btn btn-${variant}`} onClick={onClick} disabled={disabled}>{children}</button> }

@@ -42,8 +42,6 @@ Return JSON only:
   "kpis": [
     {{"label": "short business-friendly label", "column": "exact field name", "operation": "sum|mean|median|min|max|count|nunique"}}
   ],
-  "headline": "one short evidence-backed headline",
-  "findings": ["up to three concise findings using only calculated facts"],
   "next_checks": ["up to three concise, evidence-safe next checks"]
 }}
 
@@ -152,6 +150,7 @@ def build_report(frame: pd.DataFrame, profile: dict[str, Any], steps: list[dict[
     metric = plan['metric']
     charts = build_charts(frame, plan)
     facts = facts or explore(frame, profile)
+    insights = build_insights(frame, profile, metric, charts, plan)
     return {
         'domain': {
             'name': plan['dataset_type'],
@@ -161,7 +160,7 @@ def build_report(frame: pd.DataFrame, profile: dict[str, Any], steps: list[dict[
         'cleaning': steps,
         'kpis': build_kpis(frame, profile, plan),
         'charts': charts,
-        'insights': build_insights(frame, profile, metric, charts, plan),
+        'insights': insights,
         'recommendations': plan['next_checks'] or default_checks(profile, metric),
         'coverage': {
             'numeric_fields': len(facts['numeric']),
@@ -169,7 +168,7 @@ def build_report(frame: pd.DataFrame, profile: dict[str, Any], steps: list[dict[
             'time_series': len(facts['time_series']),
             'relationships': len(facts['relationships']),
         },
-        'headline': plan['headline'],
+        'headline': insights[0]['text'] if insights else '',
     }
 
 
@@ -187,8 +186,6 @@ def clean_plan(raw: dict[str, Any] | None, profile: dict[str, Any]) -> dict[str,
     date = pick(raw.get('date'), dates)
     kpis = valid_kpis(raw.get('kpis'), fields)
     checks = [str(item).strip() for item in raw.get('next_checks', []) if str(item).strip()][:3]
-    findings = [str(item).strip() for item in raw.get('findings', []) if str(item).strip()][:3]
-    headline = str(raw.get('headline') or '').strip()[:180]
     title = str(raw.get('dataset_type') or 'Dataset analysis').strip()[:80]
     reason = str(raw.get('reason') or 'Fields were selected from the detected schema and value profile.').strip()[:240]
     return {
@@ -199,8 +196,6 @@ def clean_plan(raw: dict[str, Any] | None, profile: dict[str, Any]) -> dict[str,
         'dimension': dimension,
         'date': date,
         'kpis': kpis,
-        'headline': headline,
-        'findings': findings,
         'next_checks': checks,
     }
 
@@ -306,7 +301,9 @@ def chart_rows(frame: pd.DataFrame) -> list[dict[str, Any]]:
 
 
 def build_insights(frame: pd.DataFrame, profile: dict[str, Any], metric: str | None, charts: list[dict[str, Any]], plan: dict[str, Any]) -> list[dict[str, str]]:
-    insights = [{'type': 'ai', 'text': text} for text in plan['findings']]
+    # The model selects fields and calculations, but every displayed statement is
+    # generated from locally calculated values. This keeps the briefing auditable.
+    insights = []
     issues = profile.get('issues', [])
     if issues:
         issue = max(issues, key=lambda item: item.get('count', 0))

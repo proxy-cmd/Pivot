@@ -251,7 +251,7 @@ GEMINI_API_KEY=your_api_key
 
 ## Current limits
 
-Pivot uses Pandas for in-process profiling and analysis. The default upload limit is 25MB, which keeps a single API process responsive and avoids pretending that arbitrary-size files are safe on a laptop. For larger sources, the next production step is object storage plus a worker queue and a query engine such as DuckDB or warehouse connectors.
+Pivot uses Pandas for in-process profiling and analysis. The default upload limit is 50MB, which keeps a single API process responsive and avoids pretending that arbitrary-size files are safe on a laptop. For larger sources, the next production step is object storage plus a worker queue and a query engine such as DuckDB or warehouse connectors.
 
 ---
 

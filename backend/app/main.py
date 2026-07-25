@@ -56,7 +56,7 @@ async def authentication_middleware(request: Request, call_next):
     finally:
         current_user_id.reset(token)
 
-MAX_UPLOAD_BYTES = 25 * 1024 * 1024
+MAX_UPLOAD_BYTES = 50 * 1024 * 1024
 MAX_CONTEXT_BYTES = 5 * 1024 * 1024
 ALLOWED_SUFFIXES = {'.csv', '.xlsx', '.xls', '.json', '.parquet'}
 CONTEXT_SUFFIXES = {'.pdf', '.txt', '.md', '.json'}
@@ -287,7 +287,7 @@ async def profile(file: UploadFile = File(...)):
         raise HTTPException(415, 'Supported files are CSV, Excel, JSON, and Parquet.')
     data = await file.read(MAX_UPLOAD_BYTES + 1)
     if len(data) > MAX_UPLOAD_BYTES:
-        raise HTTPException(413, 'Files must be 25MB or smaller.')
+        raise HTTPException(413, 'Files must be 50MB or smaller.')
     try:
         frame = prepare_frame(_read_bytes(data, suffix))
     except Exception as error:

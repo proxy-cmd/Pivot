@@ -28,11 +28,11 @@ def connect():
     CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, google_id TEXT NOT NULL UNIQUE, email TEXT NOT NULL UNIQUE, full_name TEXT NOT NULL, avatar_url TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP, updated_at TEXT DEFAULT CURRENT_TIMESTAMP, last_login TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS refresh_sessions (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, token_hash TEXT NOT NULL UNIQUE, expires_at TEXT NOT NULL, user_agent TEXT, ip_address TEXT, parent_id TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP, revoked_at TEXT, FOREIGN KEY(user_id) REFERENCES users(id));
     CREATE TABLE IF NOT EXISTS datasets (id TEXT PRIMARY KEY, owner_user_id TEXT, name TEXT, source_path TEXT, active_path TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP, profile TEXT, status TEXT, FOREIGN KEY(owner_user_id) REFERENCES users(id));
-    CREATE TABLE IF NOT EXISTS versions (id TEXT PRIMARY KEY, dataset_id TEXT, number INTEGER, parent_id TEXT, operation TEXT, detail TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP);
-    CREATE TABLE IF NOT EXISTS chunks (id TEXT PRIMARY KEY, dataset_id TEXT, source TEXT, content TEXT, metadata TEXT);
-    CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY AUTOINCREMENT, dataset_id TEXT, kind TEXT, message TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP);
-    CREATE TABLE IF NOT EXISTS transformations (id TEXT PRIMARY KEY, dataset_id TEXT, operation TEXT, status TEXT, preview_path TEXT, metrics TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP, resolved_at TEXT);
-    CREATE TABLE IF NOT EXISTS reports (id TEXT PRIMARY KEY, dataset_id TEXT, title TEXT, format TEXT, path TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP);
+    CREATE TABLE IF NOT EXISTS versions (id TEXT PRIMARY KEY, dataset_id TEXT, owner_user_id TEXT NOT NULL, number INTEGER, parent_id TEXT, operation TEXT, detail TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP, FOREIGN KEY(dataset_id) REFERENCES datasets(id), FOREIGN KEY(owner_user_id) REFERENCES users(id));
+    CREATE TABLE IF NOT EXISTS chunks (id TEXT PRIMARY KEY, dataset_id TEXT, owner_user_id TEXT NOT NULL, source TEXT, content TEXT, metadata TEXT, FOREIGN KEY(dataset_id) REFERENCES datasets(id), FOREIGN KEY(owner_user_id) REFERENCES users(id));
+    CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY AUTOINCREMENT, dataset_id TEXT, owner_user_id TEXT NOT NULL, kind TEXT, message TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP, FOREIGN KEY(dataset_id) REFERENCES datasets(id), FOREIGN KEY(owner_user_id) REFERENCES users(id));
+    CREATE TABLE IF NOT EXISTS transformations (id TEXT PRIMARY KEY, dataset_id TEXT, owner_user_id TEXT NOT NULL, operation TEXT, status TEXT, preview_path TEXT, metrics TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP, resolved_at TEXT, FOREIGN KEY(dataset_id) REFERENCES datasets(id), FOREIGN KEY(owner_user_id) REFERENCES users(id));
+    CREATE TABLE IF NOT EXISTS reports (id TEXT PRIMARY KEY, dataset_id TEXT, owner_user_id TEXT NOT NULL, title TEXT, format TEXT, path TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP, FOREIGN KEY(dataset_id) REFERENCES datasets(id), FOREIGN KEY(owner_user_id) REFERENCES users(id));
     ''')
     columns = {row['name'] for row in conn.execute('PRAGMA table_info(datasets)')}
     if 'active_path' not in columns:
@@ -40,7 +40,16 @@ def connect():
         conn.execute('UPDATE datasets SET active_path=source_path WHERE active_path IS NULL')
     if 'owner_user_id' not in columns:
         conn.execute('ALTER TABLE datasets ADD COLUMN owner_user_id TEXT')
+    for table in ('versions', 'chunks', 'events', 'transformations', 'reports'):
+        columns = {row['name'] for row in conn.execute(f'PRAGMA table_info({table})')}
+        if 'owner_user_id' not in columns:
+            conn.execute(f'ALTER TABLE {table} ADD COLUMN owner_user_id TEXT')
+        conn.execute(f'''UPDATE {table}
+            SET owner_user_id=(SELECT owner_user_id FROM datasets WHERE datasets.id={table}.dataset_id)
+            WHERE owner_user_id IS NULL''')
     conn.execute('CREATE INDEX IF NOT EXISTS idx_datasets_owner ON datasets(owner_user_id)')
+    for table in ('versions', 'chunks', 'events', 'transformations', 'reports'):
+        conn.execute(f'CREATE INDEX IF NOT EXISTS idx_{table}_owner_dataset ON {table}(owner_user_id, dataset_id)')
     conn.execute('CREATE INDEX IF NOT EXISTS idx_refresh_sessions_token ON refresh_sessions(token_hash)')
     conn.execute('CREATE INDEX IF NOT EXISTS idx_refresh_sessions_user ON refresh_sessions(user_id)')
     return conn
@@ -52,6 +61,14 @@ def _current_user_id() -> str:
     if not user_id:
         raise RuntimeError('A user context is required for data access.')
     return user_id
+
+
+def _require_owned_dataset(db: sqlite3.Connection, dataset_id: str) -> str:
+    owner_user_id = _current_user_id()
+    row = db.execute('SELECT id FROM datasets WHERE id=? AND owner_user_id=?', (dataset_id, owner_user_id)).fetchone()
+    if not row:
+        raise LookupError('Dataset not found.')
+    return owner_user_id
 
 
 def get_user(user_id: str):
@@ -99,7 +116,8 @@ def revoke_refresh_session(token_hash: str):
 
 def event(dataset_id: str, kind: str, message: str):
     with connect() as db:
-        db.execute('INSERT INTO events(dataset_id, kind, message) VALUES(?,?,?)', (dataset_id, kind, message))
+        owner_user_id = _require_owned_dataset(db, dataset_id)
+        db.execute('INSERT INTO events(dataset_id,owner_user_id,kind,message) VALUES(?,?,?,?)', (dataset_id, owner_user_id, kind, message))
 
 
 def create_dataset(name: str, suffix: str, raw: bytes) -> str:
@@ -116,8 +134,9 @@ def create_dataset(name: str, suffix: str, raw: bytes) -> str:
 
 def finish_dataset(dataset_id: str, profile: dict):
     with connect() as db:
-        db.execute('UPDATE datasets SET profile=?, status=? WHERE id=?', (json.dumps(profile), 'ready', dataset_id))
-        db.execute('INSERT INTO versions(id,dataset_id,number,operation,detail) VALUES(?,?,?,?,?)', (uuid4().hex, dataset_id, 0, 'source', 'Original source preserved; no changes applied.'))
+        owner_user_id = _require_owned_dataset(db, dataset_id)
+        db.execute('UPDATE datasets SET profile=?, status=? WHERE id=? AND owner_user_id=?', (json.dumps(profile), 'ready', dataset_id, owner_user_id))
+        db.execute('INSERT INTO versions(id,dataset_id,owner_user_id,number,operation,detail) VALUES(?,?,?,?,?,?)', (uuid4().hex, dataset_id, owner_user_id, 0, 'source', 'Original source preserved; no changes applied.'))
     event(dataset_id, 'profile', f"Profile complete: data quality {profile['quality_score']}/100.")
     event(dataset_id, 'ready', 'Dataset is ready for analysis and grounded chat.')
 
@@ -149,11 +168,12 @@ def get_dataset(dataset_id: str):
                 repaired['preview'] = json.loads(prepare_frame(frame).head(8).fillna('').to_json(orient='records', date_format='iso'))
                 repaired['recommendations'] = profile.get('recommendations', [])
                 with connect() as update_db:
-                    update_db.execute('UPDATE datasets SET profile=? WHERE id=?', (json.dumps(repaired), dataset_id))
+                    update_db.execute('UPDATE datasets SET profile=? WHERE id=? AND owner_user_id=?', (json.dumps(repaired), dataset_id, _current_user_id()))
                 item['profile'] = repaired
             except Exception:
                 pass
-        item['versions'] = [dict(v) for v in db.execute('SELECT * FROM versions WHERE dataset_id=? ORDER BY number', (dataset_id,))]
+        owner_user_id = _current_user_id()
+        item['versions'] = [dict(v) for v in db.execute('SELECT * FROM versions WHERE dataset_id=? AND owner_user_id=? ORDER BY number', (dataset_id, owner_user_id))]
         item['active_version'] = 0
         for version in item['versions']:
             try:
@@ -161,23 +181,26 @@ def get_dataset(dataset_id: str):
                     item['active_version'] = version['number']
             except (TypeError, json.JSONDecodeError):
                 continue
-        item['pending_transformations'] = [dict(v) for v in db.execute('SELECT * FROM transformations WHERE dataset_id=? AND status=? ORDER BY created_at DESC', (dataset_id, 'pending'))]
+        item['pending_transformations'] = [dict(v) for v in db.execute('SELECT * FROM transformations WHERE dataset_id=? AND owner_user_id=? AND status=? ORDER BY created_at DESC', (dataset_id, owner_user_id, 'pending'))]
         return item
 
 
 def add_chunks(dataset_id: str, source: str, chunks: list[str]):
     with connect() as db:
-        db.executemany('INSERT INTO chunks(id,dataset_id,source,content,metadata) VALUES(?,?,?,?,?)', [(uuid4().hex, dataset_id, source, chunk, '{}') for chunk in chunks])
+        owner_user_id = _require_owned_dataset(db, dataset_id)
+        db.executemany('INSERT INTO chunks(id,dataset_id,owner_user_id,source,content,metadata) VALUES(?,?,?,?,?,?)', [(uuid4().hex, dataset_id, owner_user_id, source, chunk, '{}') for chunk in chunks])
 
 
 def chunks_for(dataset_id: str):
     with connect() as db:
-        return [dict(row) for row in db.execute('SELECT source,content,metadata FROM chunks WHERE dataset_id=?', (dataset_id,))]
+        owner_user_id = _require_owned_dataset(db, dataset_id)
+        return [dict(row) for row in db.execute('SELECT source,content,metadata FROM chunks WHERE dataset_id=? AND owner_user_id=?', (dataset_id, owner_user_id))]
 
 
 def events_for(dataset_id: str):
     with connect() as db:
-        return [dict(row) for row in db.execute('SELECT kind,message,created_at FROM events WHERE dataset_id=? ORDER BY id DESC LIMIT 20', (dataset_id,))]
+        owner_user_id = _require_owned_dataset(db, dataset_id)
+        return [dict(row) for row in db.execute('SELECT kind,message,created_at FROM events WHERE dataset_id=? AND owner_user_id=? ORDER BY id DESC LIMIT 20', (dataset_id, owner_user_id))]
 
 
 def add_version(dataset_id: str, operation: str, detail: str):
@@ -186,27 +209,30 @@ def add_version(dataset_id: str, operation: str, detail: str):
     parent_id = current['versions'][-1]['id'] if current and current['versions'] else None
     version_id = uuid4().hex
     with connect() as db:
-        db.execute('INSERT INTO versions(id,dataset_id,number,parent_id,operation,detail) VALUES(?,?,?,?,?,?)', (version_id, dataset_id, number, parent_id, operation, detail))
+        owner_user_id = _require_owned_dataset(db, dataset_id)
+        db.execute('INSERT INTO versions(id,dataset_id,owner_user_id,number,parent_id,operation,detail) VALUES(?,?,?,?,?,?,?)', (version_id, dataset_id, owner_user_id, number, parent_id, operation, detail))
     event(dataset_id, 'lineage', f'Version {number} created: {operation}.')
     return version_id
 
 
 def activate_dataset_version(dataset_id: str, path: str, profile: dict):
     with connect() as db:
-        db.execute('UPDATE datasets SET active_path=?, profile=?, status=? WHERE id=?', (path, json.dumps(profile), 'ready', dataset_id))
+        owner_user_id = _require_owned_dataset(db, dataset_id)
+        db.execute('UPDATE datasets SET active_path=?, profile=?, status=? WHERE id=? AND owner_user_id=?', (path, json.dumps(profile), 'ready', dataset_id, owner_user_id))
 
 
 def create_transformation(dataset_id: str, operation: str, preview_path: str, metrics: dict) -> str:
     transformation_id = uuid4().hex
     with connect() as db:
-        db.execute('INSERT INTO transformations(id,dataset_id,operation,status,preview_path,metrics) VALUES(?,?,?,?,?,?)', (transformation_id, dataset_id, operation, 'pending', preview_path, json.dumps(metrics)))
+        owner_user_id = _require_owned_dataset(db, dataset_id)
+        db.execute('INSERT INTO transformations(id,dataset_id,owner_user_id,operation,status,preview_path,metrics) VALUES(?,?,?,?,?,?,?)', (transformation_id, dataset_id, owner_user_id, operation, 'pending', preview_path, json.dumps(metrics)))
     event(dataset_id, 'cleaning', f'Preview created for {operation}; awaiting approval.')
     return transformation_id
 
 
 def get_transformation(transformation_id: str):
     with connect() as db:
-        row = db.execute('SELECT * FROM transformations WHERE id=?', (transformation_id,)).fetchone()
+        row = db.execute('SELECT * FROM transformations WHERE id=? AND owner_user_id=?', (transformation_id, _current_user_id())).fetchone()
         if not row:
             return None
         item = dict(row)
@@ -216,17 +242,19 @@ def get_transformation(transformation_id: str):
 
 def resolve_transformation(transformation_id: str, status: str):
     with connect() as db:
-        db.execute('UPDATE transformations SET status=?, resolved_at=CURRENT_TIMESTAMP WHERE id=?', (status, transformation_id))
+        db.execute('UPDATE transformations SET status=?, resolved_at=CURRENT_TIMESTAMP WHERE id=? AND owner_user_id=?', (status, transformation_id, _current_user_id()))
 
 
 def add_report(dataset_id: str, title: str, format: str, path: str):
     report_id = uuid4().hex
     with connect() as db:
-        db.execute('INSERT INTO reports(id,dataset_id,title,format,path) VALUES(?,?,?,?,?)', (report_id, dataset_id, title, format, path))
+        owner_user_id = _require_owned_dataset(db, dataset_id)
+        db.execute('INSERT INTO reports(id,dataset_id,owner_user_id,title,format,path) VALUES(?,?,?,?,?,?)', (report_id, dataset_id, owner_user_id, title, format, path))
     event(dataset_id, 'report', f'Report exported: {title} ({format}).')
     return report_id
 
 
 def reports_for(dataset_id: str):
     with connect() as db:
-        return [dict(row) for row in db.execute('SELECT * FROM reports WHERE dataset_id=? ORDER BY created_at DESC', (dataset_id,))]
+        owner_user_id = _require_owned_dataset(db, dataset_id)
+        return [dict(row) for row in db.execute('SELECT * FROM reports WHERE dataset_id=? AND owner_user_id=? ORDER BY created_at DESC', (dataset_id, owner_user_id))]

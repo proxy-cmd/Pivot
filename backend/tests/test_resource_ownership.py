@@ -4,17 +4,23 @@ from contextlib import contextmanager
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
 
 from backend.app import store
 from backend.app.auth import current_user_id, issue_access_token
 from backend.app.config import get_settings
+from backend.app.db_models import Base
 
 
 @pytest.fixture
 def isolated_store(tmp_path, monkeypatch):
     monkeypatch.setattr(store, 'ROOT', tmp_path)
     monkeypatch.setattr(store, 'FILES', tmp_path / 'files')
-    monkeypatch.setattr(store, 'DB', tmp_path / 'pivot.db')
+    engine = create_engine(f'sqlite:///{tmp_path / "pivot.db"}')
+    Base.metadata.create_all(engine)
+    factory = sessionmaker(bind=engine, expire_on_commit=False)
+    monkeypatch.setattr(store, '_session', factory)
     return store
 
 

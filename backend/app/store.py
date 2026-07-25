@@ -1,58 +1,23 @@
 from __future__ import annotations
 
 import json
-import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
 
+from sqlalchemy import select
+from sqlalchemy.orm import Session, selectinload
+
+from .database import get_session_factory
+from .db_models import Chunk, Dataset, DatasetEvent, RefreshSession, Report, Transformation, User, Version
+
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 ROOT = PROJECT_ROOT / 'data'
 FILES = ROOT / 'files'
-DB = ROOT / 'pivot.db'
 
 
-def absolute_path(value: str | None) -> str | None:
-    if not value:
-        return value
-    path = Path(value)
-    return str(path if path.is_absolute() else PROJECT_ROOT / path)
-
-
-def connect():
-    ROOT.mkdir(exist_ok=True)
-    FILES.mkdir(exist_ok=True)
-    conn = sqlite3.connect(DB)
-    conn.row_factory = sqlite3.Row
-    conn.executescript('''
-    CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, google_id TEXT NOT NULL UNIQUE, email TEXT NOT NULL UNIQUE, full_name TEXT NOT NULL, avatar_url TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP, updated_at TEXT DEFAULT CURRENT_TIMESTAMP, last_login TEXT NOT NULL);
-    CREATE TABLE IF NOT EXISTS refresh_sessions (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, token_hash TEXT NOT NULL UNIQUE, expires_at TEXT NOT NULL, user_agent TEXT, ip_address TEXT, parent_id TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP, revoked_at TEXT, FOREIGN KEY(user_id) REFERENCES users(id));
-    CREATE TABLE IF NOT EXISTS datasets (id TEXT PRIMARY KEY, owner_user_id TEXT, name TEXT, source_path TEXT, active_path TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP, profile TEXT, status TEXT, FOREIGN KEY(owner_user_id) REFERENCES users(id));
-    CREATE TABLE IF NOT EXISTS versions (id TEXT PRIMARY KEY, dataset_id TEXT, owner_user_id TEXT NOT NULL, number INTEGER, parent_id TEXT, operation TEXT, detail TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP, FOREIGN KEY(dataset_id) REFERENCES datasets(id), FOREIGN KEY(owner_user_id) REFERENCES users(id));
-    CREATE TABLE IF NOT EXISTS chunks (id TEXT PRIMARY KEY, dataset_id TEXT, owner_user_id TEXT NOT NULL, source TEXT, content TEXT, metadata TEXT, FOREIGN KEY(dataset_id) REFERENCES datasets(id), FOREIGN KEY(owner_user_id) REFERENCES users(id));
-    CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY AUTOINCREMENT, dataset_id TEXT, owner_user_id TEXT NOT NULL, kind TEXT, message TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP, FOREIGN KEY(dataset_id) REFERENCES datasets(id), FOREIGN KEY(owner_user_id) REFERENCES users(id));
-    CREATE TABLE IF NOT EXISTS transformations (id TEXT PRIMARY KEY, dataset_id TEXT, owner_user_id TEXT NOT NULL, operation TEXT, status TEXT, preview_path TEXT, metrics TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP, resolved_at TEXT, FOREIGN KEY(dataset_id) REFERENCES datasets(id), FOREIGN KEY(owner_user_id) REFERENCES users(id));
-    CREATE TABLE IF NOT EXISTS reports (id TEXT PRIMARY KEY, dataset_id TEXT, owner_user_id TEXT NOT NULL, title TEXT, format TEXT, path TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP, FOREIGN KEY(dataset_id) REFERENCES datasets(id), FOREIGN KEY(owner_user_id) REFERENCES users(id));
-    ''')
-    columns = {row['name'] for row in conn.execute('PRAGMA table_info(datasets)')}
-    if 'active_path' not in columns:
-        conn.execute('ALTER TABLE datasets ADD COLUMN active_path TEXT')
-        conn.execute('UPDATE datasets SET active_path=source_path WHERE active_path IS NULL')
-    if 'owner_user_id' not in columns:
-        conn.execute('ALTER TABLE datasets ADD COLUMN owner_user_id TEXT')
-    for table in ('versions', 'chunks', 'events', 'transformations', 'reports'):
-        columns = {row['name'] for row in conn.execute(f'PRAGMA table_info({table})')}
-        if 'owner_user_id' not in columns:
-            conn.execute(f'ALTER TABLE {table} ADD COLUMN owner_user_id TEXT')
-        conn.execute(f'''UPDATE {table}
-            SET owner_user_id=(SELECT owner_user_id FROM datasets WHERE datasets.id={table}.dataset_id)
-            WHERE owner_user_id IS NULL''')
-    conn.execute('CREATE INDEX IF NOT EXISTS idx_datasets_owner ON datasets(owner_user_id)')
-    for table in ('versions', 'chunks', 'events', 'transformations', 'reports'):
-        conn.execute(f'CREATE INDEX IF NOT EXISTS idx_{table}_owner_dataset ON {table}(owner_user_id, dataset_id)')
-    conn.execute('CREATE INDEX IF NOT EXISTS idx_refresh_sessions_token ON refresh_sessions(token_hash)')
-    conn.execute('CREATE INDEX IF NOT EXISTS idx_refresh_sessions_user ON refresh_sessions(user_id)')
-    return conn
+def _session() -> Session:
+    return get_session_factory()()
 
 
 def _current_user_id() -> str:
@@ -63,198 +28,190 @@ def _current_user_id() -> str:
     return user_id
 
 
-def _require_owned_dataset(db: sqlite3.Connection, dataset_id: str) -> str:
-    owner_user_id = _current_user_id()
-    row = db.execute('SELECT id FROM datasets WHERE id=? AND owner_user_id=?', (dataset_id, owner_user_id)).fetchone()
-    if not row:
+def _owned_dataset(session: Session, dataset_id: str) -> Dataset:
+    dataset = session.scalar(select(Dataset).where(Dataset.id == dataset_id, Dataset.owner_user_id == _current_user_id()))
+    if not dataset:
         raise LookupError('Dataset not found.')
-    return owner_user_id
+    return dataset
+
+
+def _user_payload(user: User) -> dict:
+    return {'id': user.id, 'google_id': user.google_id, 'email': user.email, 'full_name': user.full_name, 'avatar_url': user.avatar_url, 'created_at': user.created_at, 'updated_at': user.updated_at, 'last_login': user.last_login}
+
+
+def absolute_path(value: str | None) -> str | None:
+    if not value:
+        return value
+    path = Path(value)
+    return str(path if path.is_absolute() else PROJECT_ROOT / path)
 
 
 def get_user(user_id: str):
-    with connect() as db:
-        row = db.execute('SELECT * FROM users WHERE id=?', (user_id,)).fetchone()
-        return dict(row) if row else None
+    with _session() as session:
+        user = session.get(User, user_id)
+        return _user_payload(user) if user else None
 
 
 def upsert_google_user(google_id: str, email: str, full_name: str, avatar_url: str | None):
-    now = datetime.now(UTC).isoformat()
-    with connect() as db:
-        existing = db.execute('SELECT id FROM users WHERE google_id=?', (google_id,)).fetchone()
-        if existing:
-            db.execute('UPDATE users SET email=?, full_name=?, avatar_url=?, updated_at=?, last_login=? WHERE id=?', (email.lower(), full_name, avatar_url, now, now, existing['id']))
-            user_id = existing['id']
+    now = datetime.now(UTC)
+    with _session() as session:
+        user = session.scalar(select(User).where(User.google_id == google_id))
+        if user:
+            user.email, user.full_name, user.avatar_url, user.updated_at, user.last_login = email.lower(), full_name, avatar_url, now, now
         else:
-            user_id = uuid4().hex
-            db.execute('INSERT INTO users(id,google_id,email,full_name,avatar_url,last_login) VALUES(?,?,?,?,?,?)', (user_id, google_id, email.lower(), full_name, avatar_url, now))
-    return get_user(user_id)
+            user = User(id=uuid4().hex, google_id=google_id, email=email.lower(), full_name=full_name, avatar_url=avatar_url, last_login=now)
+            session.add(user)
+        session.commit()
+        return _user_payload(user)
 
 
 def create_refresh_session(user_id: str, token_hash: str, expires_at: str, user_agent: str, ip_address: str | None, parent_id: str | None = None):
-    with connect() as db:
-        db.execute('INSERT INTO refresh_sessions(id,user_id,token_hash,expires_at,user_agent,ip_address,parent_id) VALUES(?,?,?,?,?,?,?)', (uuid4().hex, user_id, token_hash, expires_at, user_agent, ip_address, parent_id))
+    with _session() as session:
+        session.add(RefreshSession(id=uuid4().hex, user_id=user_id, token_hash=token_hash, expires_at=datetime.fromisoformat(expires_at), user_agent=user_agent, ip_address=ip_address, parent_id=parent_id))
+        session.commit()
 
 
 def consume_refresh_session(token_hash: str):
-    now = datetime.now(UTC).isoformat()
-    with connect() as db:
-        row = db.execute('SELECT s.*, u.id AS user_id, u.google_id, u.email, u.full_name, u.avatar_url, u.created_at AS user_created_at, u.updated_at AS user_updated_at, u.last_login FROM refresh_sessions s JOIN users u ON u.id=s.user_id WHERE s.token_hash=? AND s.revoked_at IS NULL AND s.expires_at>?', (token_hash, now)).fetchone()
+    with _session() as session:
+        row = session.scalar(select(RefreshSession).options(selectinload(RefreshSession.user)).where(RefreshSession.token_hash == token_hash, RefreshSession.revoked_at.is_(None), RefreshSession.expires_at > datetime.now(UTC)).with_for_update())
         if not row:
             return None
-        db.execute('UPDATE refresh_sessions SET revoked_at=? WHERE id=? AND revoked_at IS NULL', (now, row['id']))
-        if db.total_changes != 1:
-            return None
-        item = dict(row)
-        item['user'] = {'id': item['user_id'], 'google_id': item['google_id'], 'email': item['email'], 'full_name': item['full_name'], 'avatar_url': item['avatar_url'], 'created_at': item['user_created_at'], 'updated_at': item['user_updated_at'], 'last_login': item['last_login']}
-        return item
+        row.revoked_at = datetime.now(UTC)
+        session.commit()
+        return {'id': row.id, 'user': _user_payload(row.user)}
 
 
 def revoke_refresh_session(token_hash: str):
-    with connect() as db:
-        db.execute('UPDATE refresh_sessions SET revoked_at=? WHERE token_hash=? AND revoked_at IS NULL', (datetime.now(UTC).isoformat(), token_hash))
+    with _session() as session:
+        row = session.scalar(select(RefreshSession).where(RefreshSession.token_hash == token_hash, RefreshSession.revoked_at.is_(None)))
+        if row:
+            row.revoked_at = datetime.now(UTC)
+            session.commit()
 
 
 def event(dataset_id: str, kind: str, message: str):
-    with connect() as db:
-        owner_user_id = _require_owned_dataset(db, dataset_id)
-        db.execute('INSERT INTO events(dataset_id,owner_user_id,kind,message) VALUES(?,?,?,?)', (dataset_id, owner_user_id, kind, message))
+    with _session() as session:
+        dataset = _owned_dataset(session, dataset_id)
+        session.add(DatasetEvent(dataset_id=dataset.id, owner_user_id=dataset.owner_user_id, kind=kind, message=message))
+        session.commit()
 
 
 def create_dataset(name: str, suffix: str, raw: bytes) -> str:
-    ROOT.mkdir(exist_ok=True)
-    FILES.mkdir(exist_ok=True)
+    FILES.mkdir(parents=True, exist_ok=True)
     dataset_id = uuid4().hex
     path = FILES / f'{dataset_id}{suffix}'
     path.write_bytes(raw)
-    with connect() as db:
-        db.execute('INSERT INTO datasets(id,owner_user_id,name,source_path,active_path,status) VALUES(?,?,?,?,?,?)', (dataset_id, _current_user_id(), name, str(path), str(path), 'processing'))
+    with _session() as session:
+        session.add(Dataset(id=dataset_id, owner_user_id=_current_user_id(), name=name, source_path=str(path), active_path=str(path), status='processing'))
+        session.commit()
     event(dataset_id, 'ingest', 'Source file stored unchanged as version 0.')
     return dataset_id
 
 
 def finish_dataset(dataset_id: str, profile: dict):
-    with connect() as db:
-        owner_user_id = _require_owned_dataset(db, dataset_id)
-        db.execute('UPDATE datasets SET profile=?, status=? WHERE id=? AND owner_user_id=?', (json.dumps(profile), 'ready', dataset_id, owner_user_id))
-        db.execute('INSERT INTO versions(id,dataset_id,owner_user_id,number,operation,detail) VALUES(?,?,?,?,?,?)', (uuid4().hex, dataset_id, owner_user_id, 0, 'source', 'Original source preserved; no changes applied.'))
+    with _session() as session:
+        dataset = _owned_dataset(session, dataset_id)
+        dataset.profile, dataset.status = json.dumps(profile), 'ready'
+        session.add(Version(id=uuid4().hex, dataset_id=dataset.id, owner_user_id=dataset.owner_user_id, number=0, operation='source', detail='Original source preserved; no changes applied.'))
+        session.commit()
     event(dataset_id, 'profile', f"Profile complete: data quality {profile['quality_score']}/100.")
     event(dataset_id, 'ready', 'Dataset is ready for analysis and grounded chat.')
 
 
+def _dataset_payload(dataset: Dataset) -> dict:
+    item = {'id': dataset.id, 'owner_user_id': dataset.owner_user_id, 'name': dataset.name, 'source_path': absolute_path(dataset.source_path), 'active_path': absolute_path(dataset.active_path), 'created_at': dataset.created_at, 'profile': json.loads(dataset.profile) if dataset.profile else None, 'status': dataset.status}
+    item['versions'] = [{'id': value.id, 'dataset_id': value.dataset_id, 'owner_user_id': value.owner_user_id, 'number': value.number, 'parent_id': value.parent_id, 'operation': value.operation, 'detail': value.detail, 'created_at': value.created_at} for value in sorted(dataset.versions, key=lambda value: value.number)]
+    item['pending_transformations'] = [{'id': value.id, 'dataset_id': value.dataset_id, 'owner_user_id': value.owner_user_id, 'operation': value.operation, 'status': value.status, 'preview_path': value.preview_path, 'metrics': json.loads(value.metrics or '{}'), 'created_at': value.created_at, 'resolved_at': value.resolved_at} for value in sorted((value for value in dataset.transformations if value.status == 'pending'), key=lambda value: value.created_at, reverse=True)]
+    item['active_version'] = 0
+    for version in item['versions']:
+        try:
+            if json.loads(version['detail']).get('output') == item['active_path']:
+                item['active_version'] = version['number']
+        except (TypeError, json.JSONDecodeError):
+            pass
+    return item
+
+
 def get_dataset(dataset_id: str):
-    with connect() as db:
-        row = db.execute('SELECT * FROM datasets WHERE id=? AND owner_user_id=?', (dataset_id, _current_user_id())).fetchone()
-        if not row: return None
-        item = dict(row); item['source_path'] = absolute_path(item.get('source_path')); item['active_path'] = absolute_path(item.get('active_path')); item['profile'] = json.loads(item['profile']) if item['profile'] else None
-        profile = item.get('profile') or {}
-        schema = profile.get('schema') or {}
-        date_words = ('date', 'time', 'month', 'year', 'created', 'ordered')
-        needs_profile_repair = bool(set(schema.get('date_columns', [])) & set(schema.get('numeric_columns', []))) or any(any(word in str(column).lower() for word in date_words) for column in schema.get('numeric_columns', []))
-        if needs_profile_repair:
-            try:
-                import pandas as pd
-                from .analytics import prepare_frame, profile_frame
-                source = Path(item['active_path'] or item['source_path'])
-                if source.suffix.lower() in {'.xlsx', '.xls'}:
-                    frame = pd.read_excel(source)
-                elif source.suffix.lower() == '.json':
-                    frame = pd.read_json(source)
-                elif source.suffix.lower() == '.parquet':
-                    frame = pd.read_parquet(source)
-                else:
-                    frame = pd.read_csv(source)
-                repaired = profile_frame(prepare_frame(frame), item['name'])
-                repaired['columns_list'] = [str(column) for column in prepare_frame(frame).columns]
-                repaired['preview'] = json.loads(prepare_frame(frame).head(8).fillna('').to_json(orient='records', date_format='iso'))
-                repaired['recommendations'] = profile.get('recommendations', [])
-                with connect() as update_db:
-                    update_db.execute('UPDATE datasets SET profile=? WHERE id=? AND owner_user_id=?', (json.dumps(repaired), dataset_id, _current_user_id()))
-                item['profile'] = repaired
-            except Exception:
-                pass
-        owner_user_id = _current_user_id()
-        item['versions'] = [dict(v) for v in db.execute('SELECT * FROM versions WHERE dataset_id=? AND owner_user_id=? ORDER BY number', (dataset_id, owner_user_id))]
-        item['active_version'] = 0
-        for version in item['versions']:
-            try:
-                if json.loads(version['detail']).get('output') == item.get('active_path'):
-                    item['active_version'] = version['number']
-            except (TypeError, json.JSONDecodeError):
-                continue
-        item['pending_transformations'] = [dict(v) for v in db.execute('SELECT * FROM transformations WHERE dataset_id=? AND owner_user_id=? AND status=? ORDER BY created_at DESC', (dataset_id, owner_user_id, 'pending'))]
-        return item
+    with _session() as session:
+        dataset = session.scalar(select(Dataset).options(selectinload(Dataset.versions), selectinload(Dataset.transformations)).where(Dataset.id == dataset_id, Dataset.owner_user_id == _current_user_id()))
+        return _dataset_payload(dataset) if dataset else None
 
 
 def add_chunks(dataset_id: str, source: str, chunks: list[str]):
-    with connect() as db:
-        owner_user_id = _require_owned_dataset(db, dataset_id)
-        db.executemany('INSERT INTO chunks(id,dataset_id,owner_user_id,source,content,metadata) VALUES(?,?,?,?,?,?)', [(uuid4().hex, dataset_id, owner_user_id, source, chunk, '{}') for chunk in chunks])
+    with _session() as session:
+        dataset = _owned_dataset(session, dataset_id)
+        session.add_all(Chunk(id=uuid4().hex, dataset_id=dataset.id, owner_user_id=dataset.owner_user_id, source=source, content=chunk, metadata_json='{}') for chunk in chunks)
+        session.commit()
 
 
 def chunks_for(dataset_id: str):
-    with connect() as db:
-        owner_user_id = _require_owned_dataset(db, dataset_id)
-        return [dict(row) for row in db.execute('SELECT source,content,metadata FROM chunks WHERE dataset_id=? AND owner_user_id=?', (dataset_id, owner_user_id))]
+    with _session() as session:
+        dataset = _owned_dataset(session, dataset_id)
+        return [{'source': row.source, 'content': row.content, 'metadata': row.metadata_json} for row in session.scalars(select(Chunk).where(Chunk.dataset_id == dataset.id, Chunk.owner_user_id == dataset.owner_user_id)).all()]
 
 
 def events_for(dataset_id: str):
-    with connect() as db:
-        owner_user_id = _require_owned_dataset(db, dataset_id)
-        return [dict(row) for row in db.execute('SELECT kind,message,created_at FROM events WHERE dataset_id=? AND owner_user_id=? ORDER BY id DESC LIMIT 20', (dataset_id, owner_user_id))]
+    with _session() as session:
+        dataset = _owned_dataset(session, dataset_id)
+        return [{'kind': row.kind, 'message': row.message, 'created_at': row.created_at} for row in session.scalars(select(DatasetEvent).where(DatasetEvent.dataset_id == dataset.id, DatasetEvent.owner_user_id == dataset.owner_user_id).order_by(DatasetEvent.id.desc()).limit(20)).all()]
 
 
 def add_version(dataset_id: str, operation: str, detail: str):
-    current = get_dataset(dataset_id)
-    number = len(current['versions']) if current else 0
-    parent_id = current['versions'][-1]['id'] if current and current['versions'] else None
-    version_id = uuid4().hex
-    with connect() as db:
-        owner_user_id = _require_owned_dataset(db, dataset_id)
-        db.execute('INSERT INTO versions(id,dataset_id,owner_user_id,number,parent_id,operation,detail) VALUES(?,?,?,?,?,?,?)', (version_id, dataset_id, owner_user_id, number, parent_id, operation, detail))
-    event(dataset_id, 'lineage', f'Version {number} created: {operation}.')
-    return version_id
+    with _session() as session:
+        dataset = _owned_dataset(session, dataset_id)
+        versions = session.scalars(select(Version).where(Version.dataset_id == dataset.id, Version.owner_user_id == dataset.owner_user_id).order_by(Version.number)).all()
+        version = Version(id=uuid4().hex, dataset_id=dataset.id, owner_user_id=dataset.owner_user_id, number=len(versions), parent_id=versions[-1].id if versions else None, operation=operation, detail=detail)
+        session.add(version)
+        session.commit()
+    event(dataset_id, 'lineage', f'Version {version.number} created: {operation}.')
+    return version.id
 
 
 def activate_dataset_version(dataset_id: str, path: str, profile: dict):
-    with connect() as db:
-        owner_user_id = _require_owned_dataset(db, dataset_id)
-        db.execute('UPDATE datasets SET active_path=?, profile=?, status=? WHERE id=? AND owner_user_id=?', (path, json.dumps(profile), 'ready', dataset_id, owner_user_id))
+    with _session() as session:
+        dataset = _owned_dataset(session, dataset_id)
+        dataset.active_path, dataset.profile, dataset.status = path, json.dumps(profile), 'ready'
+        session.commit()
 
 
 def create_transformation(dataset_id: str, operation: str, preview_path: str, metrics: dict) -> str:
-    transformation_id = uuid4().hex
-    with connect() as db:
-        owner_user_id = _require_owned_dataset(db, dataset_id)
-        db.execute('INSERT INTO transformations(id,dataset_id,owner_user_id,operation,status,preview_path,metrics) VALUES(?,?,?,?,?,?,?)', (transformation_id, dataset_id, owner_user_id, operation, 'pending', preview_path, json.dumps(metrics)))
+    with _session() as session:
+        dataset = _owned_dataset(session, dataset_id)
+        value = Transformation(id=uuid4().hex, dataset_id=dataset.id, owner_user_id=dataset.owner_user_id, operation=operation, status='pending', preview_path=preview_path, metrics=json.dumps(metrics))
+        session.add(value)
+        session.commit()
     event(dataset_id, 'cleaning', f'Preview created for {operation}; awaiting approval.')
-    return transformation_id
+    return value.id
 
 
 def get_transformation(transformation_id: str):
-    with connect() as db:
-        row = db.execute('SELECT * FROM transformations WHERE id=? AND owner_user_id=?', (transformation_id, _current_user_id())).fetchone()
-        if not row:
+    with _session() as session:
+        value = session.scalar(select(Transformation).where(Transformation.id == transformation_id, Transformation.owner_user_id == _current_user_id()))
+        if not value:
             return None
-        item = dict(row)
-        item['metrics'] = json.loads(item['metrics'] or '{}')
-        return item
+        return {'id': value.id, 'dataset_id': value.dataset_id, 'owner_user_id': value.owner_user_id, 'operation': value.operation, 'status': value.status, 'preview_path': value.preview_path, 'metrics': json.loads(value.metrics or '{}'), 'created_at': value.created_at, 'resolved_at': value.resolved_at}
 
 
 def resolve_transformation(transformation_id: str, status: str):
-    with connect() as db:
-        db.execute('UPDATE transformations SET status=?, resolved_at=CURRENT_TIMESTAMP WHERE id=? AND owner_user_id=?', (status, transformation_id, _current_user_id()))
+    with _session() as session:
+        value = session.scalar(select(Transformation).where(Transformation.id == transformation_id, Transformation.owner_user_id == _current_user_id()))
+        if value:
+            value.status, value.resolved_at = status, datetime.now(UTC)
+            session.commit()
 
 
 def add_report(dataset_id: str, title: str, format: str, path: str):
-    report_id = uuid4().hex
-    with connect() as db:
-        owner_user_id = _require_owned_dataset(db, dataset_id)
-        db.execute('INSERT INTO reports(id,dataset_id,owner_user_id,title,format,path) VALUES(?,?,?,?,?,?)', (report_id, dataset_id, owner_user_id, title, format, path))
+    with _session() as session:
+        dataset = _owned_dataset(session, dataset_id)
+        value = Report(id=uuid4().hex, dataset_id=dataset.id, owner_user_id=dataset.owner_user_id, title=title, format=format, path=path)
+        session.add(value)
+        session.commit()
     event(dataset_id, 'report', f'Report exported: {title} ({format}).')
-    return report_id
+    return value.id
 
 
 def reports_for(dataset_id: str):
-    with connect() as db:
-        owner_user_id = _require_owned_dataset(db, dataset_id)
-        return [dict(row) for row in db.execute('SELECT * FROM reports WHERE dataset_id=? AND owner_user_id=? ORDER BY created_at DESC', (dataset_id, owner_user_id))]
+    with _session() as session:
+        dataset = _owned_dataset(session, dataset_id)
+        return [{'id': row.id, 'dataset_id': row.dataset_id, 'owner_user_id': row.owner_user_id, 'title': row.title, 'format': row.format, 'path': row.path, 'created_at': row.created_at} for row in session.scalars(select(Report).where(Report.dataset_id == dataset.id, Report.owner_user_id == dataset.owner_user_id).order_by(Report.created_at.desc())).all()]

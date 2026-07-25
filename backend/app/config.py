@@ -4,6 +4,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
+    database_url: str = ''
     gemini_api_key: str = ''
     gemini_model: str = 'gemini-3.5-flash'
     cors_origins: str = 'http://localhost:5173'
@@ -29,6 +30,11 @@ class Settings(BaseSettings):
     def missing_auth_settings(self) -> list[str]:
         required = {'GOOGLE_CLIENT_ID': self.google_client_id, 'GOOGLE_CLIENT_SECRET': self.google_client_secret, 'JWT_SECRET': self.jwt_secret}
         return [name for name, value in required.items() if not value]
+
+    def require_database_url(self) -> str:
+        if not self.database_url:
+            raise RuntimeError('DATABASE_URL must be configured.')
+        return self.database_url
 
 
 @lru_cache

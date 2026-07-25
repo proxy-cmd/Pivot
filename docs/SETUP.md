@@ -10,6 +10,8 @@ Copy-Item backend/.env.example backend/.env
 npm run api
 ```
 
+For a working local workspace, set `DATABASE_URL` in `backend/.env` to a PostgreSQL database and add the Google OAuth values plus a long `JWT_SECRET`. The API intentionally returns a configuration error instead of allowing unauthenticated data access.
+
 Start the web application in another terminal:
 
 ```powershell
@@ -31,4 +33,4 @@ Add `GEMINI_API_KEY` only to `backend/.env`. It is never sent to the browser. Wi
 docker compose up --build
 ```
 
-This production container serves the API on port 8000. Place a reverse proxy such as Caddy, Nginx, or a cloud load balancer in front of it for TLS and static-file delivery.
+Run Compose with an environment file containing `POSTGRES_DB`, `POSTGRES_USER`, `POSTGRES_PASSWORD`, and a `DATABASE_URL` that uses the Compose hostname `postgres` (not `localhost`). This production container serves the API on port 8000. Place a reverse proxy such as Caddy, Nginx, or a cloud load balancer in front of it for TLS and static-file delivery.

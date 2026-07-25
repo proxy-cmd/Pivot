@@ -4,7 +4,7 @@
 
 Pivot is an AI-powered Business Intelligence platform that helps users understand their data without writing repetitive code.
 
-Upload a **CSV** or **Excel** file, and Pivot automatically profiles the dataset, detects quality issues, generates insights, and lets you explore the data using natural language or SQL.
+Upload a **CSV**, **Excel**, **JSON**, or **Parquet** file, and Pivot automatically profiles the dataset, detects quality issues, generates insights, and lets you explore the data using natural language or SQL.
 
 Instead of modifying the uploaded dataset, Pivot preserves the original file and creates new versions whenever transformations are applied, making every change traceable and reproducible.
 
@@ -108,6 +108,16 @@ When a question is asked, the system:
 
 This approach reduces hallucinations and keeps responses focused on the uploaded dataset rather than relying on general knowledge.
 
+### Business context
+
+Attach a PDF, Markdown, text, or JSON business glossary from the AI Analyst. Pivot indexes the readable content in the dataset's private context, so questions can use definitions such as how your company defines an active customer or revenue.
+
+### Private workspaces
+
+- Google OAuth sign-in with short-lived access tokens and rotated refresh sessions
+- Dataset, report, version, transformation, event, and RAG-context ownership enforced on every API request
+- PostgreSQL-ready SQLAlchemy persistence with Alembic migrations
+
 ---
 
 ### 📊 Analytics
@@ -167,7 +177,7 @@ Track every modification while preserving the original uploaded file.
 - Pandas
 - NumPy
 - Scikit-learn
-- SQLite
+- PostgreSQL (production) / SQLite (tests)
 
 ### AI
 
@@ -233,18 +243,20 @@ Create:
 backend/.env
 ```
 
-Add your Gemini API key (optional):
+Configure the database, Google OAuth, and optional Gemini key. Use [the setup guide](docs/SETUP.md) for local and Docker setup.
 
 ```env
 GEMINI_API_KEY=your_api_key
 ```
 
+## Current limits
+
+Pivot uses Pandas for in-process profiling and analysis. The default upload limit is 25MB, which keeps a single API process responsive and avoids pretending that arbitrary-size files are safe on a laptop. For larger sources, the next production step is object storage plus a worker queue and a query engine such as DuckDB or warehouse connectors.
+
 ---
 
 ## Roadmap
 
-- Authentication & user accounts
-- Multi-user workspaces
 - Interactive dashboards
 - Advanced lineage visualization
 - Database connectors
@@ -260,7 +272,7 @@ GEMINI_API_KEY=your_api_key
 - React
 - FastAPI
 - Pandas
-- SQLite
+- PostgreSQL
 - Scikit-learn
 - Gemini API
 

@@ -4,6 +4,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
+    app_env: str = 'development'
     database_url: str = ''
     gemini_api_key: str = ''
     gemini_model: str = 'gemini-3.5-flash'
@@ -30,6 +31,15 @@ class Settings(BaseSettings):
     def missing_auth_settings(self) -> list[str]:
         required = {'GOOGLE_CLIENT_ID': self.google_client_id, 'GOOGLE_CLIENT_SECRET': self.google_client_secret, 'JWT_SECRET': self.jwt_secret}
         return [name for name, value in required.items() if not value]
+
+    def validate_auth_security(self) -> None:
+        if len(self.jwt_secret.encode('utf-8')) < 32 or self.jwt_secret.startswith('replace-with-'):
+            raise ValueError('JWT_SECRET must be at least 32 bytes.')
+        if self.app_env.lower() == 'production':
+            if not self.cookie_secure:
+                raise ValueError('COOKIE_SECURE must be true in production.')
+            if not self.frontend_url.startswith('https://') or not self.google_redirect_uri.startswith('https://'):
+                raise ValueError('Production OAuth URLs must use HTTPS.')
 
     def require_database_url(self) -> str:
         if not self.database_url:

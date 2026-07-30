@@ -18,9 +18,14 @@ current_user_id: ContextVar[str | None] = ContextVar('current_user_id', default=
 
 
 def require_auth_configuration() -> None:
-    missing = get_settings().missing_auth_settings()
+    settings = get_settings()
+    missing = settings.missing_auth_settings()
     if missing:
         raise HTTPException(503, f'Authentication is unavailable: missing {", ".join(missing)}.')
+    try:
+        settings.validate_auth_security()
+    except ValueError as error:
+        raise HTTPException(503, f'Authentication is unavailable: {error}') from error
 
 
 def issue_access_token(user_id: str) -> str:
@@ -53,7 +58,9 @@ def new_refresh_token() -> str:
 def authenticate_request(request: Request) -> dict[str, Any]:
     authorization = request.headers.get('Authorization', '')
     scheme, _, token = authorization.partition(' ')
-    if scheme.lower() != 'bearer' or not token:
+    if scheme.lower() != 'bearer':
+        token = request.cookies.get('pivot_access', '')
+    if not token:
         raise HTTPException(401, 'Authentication required.', headers={'WWW-Authenticate': 'Bearer'})
     payload = decode_access_token(token)
     user = get_user(payload['sub'])

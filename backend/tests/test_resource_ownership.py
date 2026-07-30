@@ -10,6 +10,7 @@ from sqlalchemy.orm import sessionmaker
 from backend.app import store
 from backend.app.auth import current_user_id, issue_access_token
 from backend.app.config import get_settings
+from backend.app.config import Settings
 from backend.app.db_models import Base
 
 
@@ -117,3 +118,30 @@ def test_business_context_is_attached_only_to_the_dataset_owner(isolated_store, 
     assert response.json()['chunks'] == 1
     with user_scope(owner['id']):
         assert any('Active customer' in item['content'] for item in store.chunks_for(dataset_id))
+
+
+def test_security_config_rejects_weak_jwt_secret():
+    with pytest.raises(ValueError):
+        Settings(jwt_secret='too-short').validate_auth_security()
+    with pytest.raises(ValueError):
+        Settings(jwt_secret='replace-with-a-long-random-secret-value').validate_auth_security()
+
+
+def test_api_rejects_untrusted_origin_and_sets_security_headers(isolated_store, monkeypatch):
+    monkeypatch.setenv('JWT_SECRET', 'test-jwt-secret-that-is-long-enough')
+    monkeypatch.setenv('GOOGLE_CLIENT_ID', 'test-client')
+    monkeypatch.setenv('GOOGLE_CLIENT_SECRET', 'test-secret')
+    get_settings.cache_clear()
+    owner = create_user('origin-owner', 'origin-owner@example.test')
+    dataset_id, _, _ = create_owned_resources(owner)
+
+    from backend.app.main import app
+
+    client = TestClient(app)
+    health = client.get('/health')
+    assert health.headers['x-content-type-options'] == 'nosniff'
+    response = client.post(
+        f'/api/datasets/{dataset_id}/autopilot',
+        headers={'Authorization': f"Bearer {issue_access_token(owner['id'])}", 'Origin': 'https://attacker.example', 'Cookie': 'pivot_access=present'},
+    )
+    assert response.status_code == 403

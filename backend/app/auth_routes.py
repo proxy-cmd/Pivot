@@ -34,6 +34,12 @@ def _redirect_to_frontend(error: str | None = None) -> RedirectResponse:
     return RedirectResponse(url, status_code=302)
 
 
+def _require_trusted_origin(request: Request) -> None:
+    origin = request.headers.get('origin')
+    if origin and origin.rstrip('/') not in {value.strip().rstrip('/') for value in get_settings().cors_origins.split(',')}:
+        raise HTTPException(403, 'Request origin is not allowed.')
+
+
 @router.get('/google/login')
 async def google_login(request: Request):
     require_auth_configuration()
@@ -55,7 +61,7 @@ async def google_callback(request: Request):
         create_refresh_session(user['id'], token_digest(refresh_token), expires_at.isoformat(), request.headers.get('user-agent', '')[:500], request.client.host if request.client else None)
         response = _redirect_to_frontend()
         response.set_cookie('pivot_refresh', refresh_token, httponly=True, secure=get_settings().cookie_secure, samesite='lax', max_age=get_settings().refresh_token_days * 86400, path='/api/auth')
-        response.set_cookie('pivot_access', issue_access_token(user['id']), httponly=False, secure=get_settings().cookie_secure, samesite='lax', max_age=get_settings().access_token_minutes * 60, path='/')
+        response.set_cookie('pivot_access', issue_access_token(user['id']), httponly=True, secure=get_settings().cookie_secure, samesite='lax', max_age=get_settings().access_token_minutes * 60, path='/')
         return response
     except HTTPException as error:
         logger.warning('Google authentication rejected: %s', error.detail)
@@ -67,6 +73,7 @@ async def google_callback(request: Request):
 
 @router.post('/refresh')
 def refresh(request: Request):
+    _require_trusted_origin(request)
     refresh_token = request.cookies.get('pivot_refresh')
     if not refresh_token:
         raise HTTPException(401, 'Refresh token is missing.')
@@ -79,12 +86,13 @@ def refresh(request: Request):
     create_refresh_session(user['id'], token_digest(replacement), expires_at.isoformat(), request.headers.get('user-agent', '')[:500], request.client.host if request.client else None, session['id'])
     response = Response(status_code=204)
     response.set_cookie('pivot_refresh', replacement, httponly=True, secure=get_settings().cookie_secure, samesite='lax', max_age=get_settings().refresh_token_days * 86400, path='/api/auth')
-    response.set_cookie('pivot_access', issue_access_token(user['id']), httponly=False, secure=get_settings().cookie_secure, samesite='lax', max_age=get_settings().access_token_minutes * 60, path='/')
+    response.set_cookie('pivot_access', issue_access_token(user['id']), httponly=True, secure=get_settings().cookie_secure, samesite='lax', max_age=get_settings().access_token_minutes * 60, path='/')
     return response
 
 
 @router.post('/logout', status_code=204)
 def logout(request: Request):
+    _require_trusted_origin(request)
     token = request.cookies.get('pivot_refresh')
     if token:
         revoke_refresh_session(token_digest(token))

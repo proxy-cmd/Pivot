@@ -9,9 +9,11 @@ FROM python:3.12-slim
 WORKDIR /app
 COPY backend/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
-COPY backend ./backend
-COPY alembic ./alembic
-COPY alembic.ini ./alembic.ini
-COPY --from=web /app/dist ./public
+RUN useradd --create-home --uid 10001 pivot && mkdir -p /app/data/files && chown -R pivot:pivot /app
+COPY --chown=pivot:pivot backend ./backend
+COPY --chown=pivot:pivot alembic ./alembic
+COPY --chown=pivot:pivot alembic.ini ./alembic.ini
+COPY --chown=pivot:pivot --from=web /app/dist ./public
+USER pivot
 EXPOSE 8000
 CMD ["sh", "-c", "alembic upgrade head && uvicorn backend.app.main:app --host 0.0.0.0 --port 8000"]

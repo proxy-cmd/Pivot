@@ -10,15 +10,15 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "@vitejs/plugin-react": "latest",
+    "@vitejs/plugin-react": "6.0.3",
     "axios": "^1.7.9",
-    "lucide-react": "latest",
-    "recharts": "latest",
-    "react": "latest",
-    "react-dom": "latest"
+    "lucide-react": "1.24.0",
+    "recharts": "3.9.2",
+    "react": "19.2.7",
+    "react-dom": "19.2.7"
   },
   "devDependencies": {
     "concurrently": "^9.2.1",
-    "vite": "latest"
+    "vite": "8.1.4"
   }
 }

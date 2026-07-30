@@ -3,7 +3,10 @@ from __future__ import annotations
 import asyncio
 import io
 import json
+import logging
 import re
+import time
+from collections import defaultdict, deque
 from uuid import uuid4
 from pathlib import Path
 from typing import Any
@@ -32,19 +35,57 @@ from .store import (
 
 app = FastAPI(title='Pivot Analytics API', version='1.2.0')
 settings = get_settings()
+logger = logging.getLogger(__name__)
 cors_origins = sorted({origin.strip() for origin in settings.cors_origins.split(',') if origin.strip()})
 app.add_middleware(SessionMiddleware, secret_key=settings.jwt_secret or 'development-only-oauth-state-secret', https_only=settings.cookie_secure, same_site='lax')
 app.add_middleware(CORSMiddleware, allow_origins=cors_origins, allow_credentials=True, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Authorization'])
 app.include_router(auth_router)
 
+_requests: dict[str, deque[float]] = defaultdict(deque)
+
+
+def _is_rate_limited(request: Request) -> bool:
+    limits = {
+        '/api/auth/google/login': (10, 60),
+        '/api/auth/refresh': (30, 60),
+        '/api/chat': (40, 60),
+        '/api/datasets': (12, 300),
+    }
+    rule = limits.get(request.url.path)
+    if not rule:
+        return False
+    limit, window = rule
+    client = request.client.host if request.client else 'unknown'
+    key = f'{request.url.path}:{client}'
+    now = time.monotonic()
+    entries = _requests[key]
+    while entries and entries[0] <= now - window:
+        entries.popleft()
+    if len(entries) >= limit:
+        return True
+    entries.append(now)
+    return False
+
+
+def _trusted_origin(request: Request) -> bool:
+    origin = request.headers.get('origin')
+    if not origin:
+        return True
+    allowed = {value.strip().rstrip('/') for value in cors_origins}
+    return origin.rstrip('/') in allowed
+
 
 @app.middleware('http')
 async def authentication_middleware(request: Request, call_next):
     path = request.url.path
+    if _is_rate_limited(request):
+        return JSONResponse({'detail': 'Too many requests. Please try again shortly.'}, status_code=429, headers={'Retry-After': '60'})
     if request.method == 'OPTIONS' or path in {'/health', '/docs', '/openapi.json', '/redoc'} or path.startswith('/api/auth/'):
         return await call_next(request)
     if not path.startswith('/api/'):
         return await call_next(request)
+    if request.method in {'POST', 'PUT', 'PATCH', 'DELETE'} and request.cookies.get('pivot_access') and not _trusted_origin(request):
+        return JSONResponse({'detail': 'Request origin is not allowed.'}, status_code=403)
     try:
         user = authenticate_request(request)
     except HTTPException as error:
@@ -56,10 +97,35 @@ async def authentication_middleware(request: Request, call_next):
     finally:
         current_user_id.reset(token)
 
+
+@app.middleware('http')
+async def security_headers(request: Request, call_next):
+    request_id = uuid4().hex
+    try:
+        response = await call_next(request)
+    except Exception:
+        logger.exception('Unhandled request error id=%s path=%s', request_id, request.url.path)
+        return JSONResponse({'detail': 'An unexpected error occurred.', 'request_id': request_id}, status_code=500)
+    response.headers['X-Request-ID'] = request_id
+    response.headers['X-Content-Type-Options'] = 'nosniff'
+    response.headers['X-Frame-Options'] = 'DENY'
+    response.headers['Referrer-Policy'] = 'strict-origin-when-cross-origin'
+    response.headers['Permissions-Policy'] = 'camera=(), microphone=(), geolocation=()'
+    response.headers['Content-Security-Policy'] = "default-src 'self'; connect-src 'self'; img-src 'self' data: https:; style-src 'self' 'unsafe-inline'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'"
+    if settings.cookie_secure:
+        response.headers['Strict-Transport-Security'] = 'max-age=31536000; includeSubDomains'
+    return response
+
 MAX_UPLOAD_BYTES = 50 * 1024 * 1024
 MAX_CONTEXT_BYTES = 5 * 1024 * 1024
 ALLOWED_SUFFIXES = {'.csv', '.xlsx', '.xls', '.json', '.parquet'}
 CONTEXT_SUFFIXES = {'.pdf', '.txt', '.md', '.json'}
+ALLOWED_UPLOAD_TYPES = {
+    'application/octet-stream', 'text/csv', 'application/csv', 'application/json',
+    'application/vnd.ms-excel', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    'application/vnd.apache.parquet', 'application/x-parquet',
+}
+ALLOWED_CONTEXT_TYPES = {'application/octet-stream', 'application/pdf', 'text/plain', 'text/markdown', 'application/json'}
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -73,6 +139,11 @@ def _dataset_or_404(dataset_id: str) -> dict:
     if not item:
         raise HTTPException(404, 'Dataset session not found.')
     return item
+
+
+def _validate_upload_name(filename: str) -> None:
+    if len(filename) > 255 or Path(filename).name != filename or any(ord(char) < 32 for char in filename):
+        raise HTTPException(400, 'Invalid file name.')
 
 
 def _read_bytes(raw: bytes, suffix: str) -> pd.DataFrame:
@@ -282,9 +353,12 @@ def health():
 async def profile(file: UploadFile = File(...)):
     if not file.filename:
         raise HTTPException(400, 'File name is required.')
+    _validate_upload_name(file.filename)
     suffix = Path(file.filename).suffix.lower()
     if suffix not in ALLOWED_SUFFIXES:
         raise HTTPException(415, 'Supported files are CSV, Excel, JSON, and Parquet.')
+    if file.content_type not in ALLOWED_UPLOAD_TYPES:
+        raise HTTPException(415, 'The uploaded content type is not supported.')
     data = await file.read(MAX_UPLOAD_BYTES + 1)
     if len(data) > MAX_UPLOAD_BYTES:
         raise HTTPException(413, 'Files must be 50MB or smaller.')
@@ -333,9 +407,12 @@ async def add_dataset_context(dataset_id: str, file: UploadFile = File(...)):
     _dataset_or_404(dataset_id)
     if not file.filename:
         raise HTTPException(400, 'A context file name is required.')
+    _validate_upload_name(file.filename)
     suffix = Path(file.filename).suffix.lower()
     if suffix not in CONTEXT_SUFFIXES:
         raise HTTPException(415, 'Context files must be PDF, TXT, Markdown, or JSON.')
+    if file.content_type not in ALLOWED_CONTEXT_TYPES:
+        raise HTTPException(415, 'The context content type is not supported.')
     raw = await file.read(MAX_CONTEXT_BYTES + 1)
     if len(raw) > MAX_CONTEXT_BYTES:
         raise HTTPException(413, 'Context files must be 5MB or smaller.')
@@ -728,8 +805,8 @@ def call_gemini(prompt: str) -> str | None:
             contents=prompt
         )
         return response.text
-    except Exception as e:
-        print(f"Gemini call failed: {e}")
+    except Exception:
+        logger.warning('Gemini call failed.')
         return None
 
 
@@ -878,8 +955,8 @@ Respond ONLY with a JSON block in this exact format (no markdown except the json
                     'rows': preview_rows[:10], 'insights': [f"Proposed: {preview.get('rows_before', 0):,} → {preview.get('rows_after', 0):,} rows."],
                     'driver_rows': [], 'visualization': None, 'evidence': {'operation': cleaning_op}, 'action': action, 'download_url': None, 'citations': citations,
                 }
-        except Exception as e:
-            print(f"Cleaning execution failed: {e}")
+        except Exception:
+            logger.warning('Cleaning action could not be completed.')
             # fall through to deterministic/fallback assistant
 
     # 2.2 Data query request
@@ -947,8 +1024,8 @@ Respond ONLY with a JSON block in this exact format:
                     'download_url': None,
                     'citations': citations,
                 }
-        except Exception as e:
-            print(f"Query agent execution failed: {e}")
+        except Exception:
+            logger.warning('AI query execution could not be completed.')
             # fall through to deterministic/fallback assistant
 
     # 2.3 General Chat or Fallback (for no API key or execution failure)

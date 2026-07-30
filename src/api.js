@@ -11,18 +11,9 @@ export const api = axios.create({ baseURL, withCredentials: true })
 export function getAccessToken() { return accessToken }
 export function setAccessToken(token) { accessToken = token || null }
 
-function readAccessCookie() {
-  return document.cookie.split('; ').find(value => value.startsWith('pivot_access='))?.split('=')[1] || null
-}
-
 async function refreshAccessToken() {
   if (!refreshPromise) {
-    refreshPromise = api.post('/api/auth/refresh', null, { skipAuthRefresh: true }).then(() => {
-      const token = readAccessCookie()
-      if (!token) throw new Error('The refreshed session did not include an access token.')
-      setAccessToken(token)
-      return token
-    }).finally(() => { refreshPromise = null })
+    refreshPromise = api.post('/api/auth/refresh', null, { skipAuthRefresh: true }).then(() => null).finally(() => { refreshPromise = null })
   }
   return refreshPromise
 }
@@ -37,8 +28,7 @@ api.interceptors.response.use(response => response, async error => {
   if (error.response?.status !== 401 || request?.skipAuthRefresh || request?._retry) return Promise.reject(error)
   request._retry = true
   try {
-    const token = await refreshAccessToken()
-    request.headers.Authorization = `Bearer ${token}`
+    await refreshAccessToken()
     return api(request)
   } catch (refreshError) {
     setAccessToken(null)

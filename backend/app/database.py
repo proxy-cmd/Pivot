@@ -11,7 +11,11 @@ from .config import get_settings
 
 
 def _create_engine(database_url: str) -> Engine:
-    engine = create_engine(database_url, pool_pre_ping=True)
+    settings = get_settings()
+    options = {'pool_pre_ping': True}
+    if not database_url.startswith('sqlite'):
+        options.update(pool_size=settings.db_pool_size, max_overflow=settings.db_max_overflow, pool_recycle=1800)
+    engine = create_engine(database_url, **options)
     if database_url.startswith('sqlite'):
         @event.listens_for(engine, 'connect')
         def enable_sqlite_foreign_keys(dbapi_connection, _connection_record) -> None:
@@ -39,4 +43,3 @@ def get_session() -> Generator[Session, None, None]:
         raise
     finally:
         session.close()
-

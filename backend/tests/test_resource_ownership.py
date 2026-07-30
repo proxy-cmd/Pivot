@@ -16,8 +16,6 @@ from backend.app.db_models import Base
 
 @pytest.fixture
 def isolated_store(tmp_path, monkeypatch):
-    monkeypatch.setattr(store, 'ROOT', tmp_path)
-    monkeypatch.setattr(store, 'FILES', tmp_path / 'files')
     engine = create_engine(f'sqlite:///{tmp_path / "pivot.db"}')
     Base.metadata.create_all(engine)
     factory = sessionmaker(bind=engine, expire_on_commit=False)
@@ -40,7 +38,7 @@ def create_user(google_id: str, email: str) -> dict:
 
 def create_owned_resources(owner: dict) -> tuple[str, str, str]:
     with user_scope(owner['id']):
-        dataset_id = store.create_dataset('private.csv', '.csv', b'value\n1\n')
+        dataset_id = store.create_dataset('private.csv', 'users/test/datasets/test/source.csv')
         store.finish_dataset(dataset_id, {'quality_score': 100})
         store.add_chunks(dataset_id, 'private.csv', ['private context'])
         store.add_version(dataset_id, 'cleaned', '{}')

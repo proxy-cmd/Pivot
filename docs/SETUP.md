@@ -12,7 +12,7 @@ npm run api
 
 For a working local workspace, set `DATABASE_URL` in `backend/.env` to a PostgreSQL database and add the Google OAuth values plus a long `JWT_SECRET`. The API intentionally returns a configuration error instead of allowing unauthenticated data access.
 
-For production, set `APP_ENV=production`, `COOKIE_SECURE=true`, HTTPS `FRONTEND_URL` and `GOOGLE_REDIRECT_URI`, and restrict `CORS_ORIGINS` to your real frontend domain. `JWT_SECRET` must be a unique value of at least 32 bytes; the example placeholder is rejected.
+For production, set `APP_ENV=production`, `COOKIE_SECURE=true`, HTTPS `FRONTEND_URL` and `GOOGLE_REDIRECT_URI`, and restrict `CORS_ORIGINS` to your real frontend domain. `JWT_SECRET` must be a unique value of at least 32 bytes; the example placeholder is rejected. Production startup also requires a PostgreSQL `DATABASE_URL` and `STORAGE_BACKEND=s3` with `STORAGE_BUCKET`, `STORAGE_ACCESS_KEY`, and `STORAGE_SECRET_KEY`. `STORAGE_ENDPOINT_URL` is optional for AWS S3 and should be set for R2 or another S3-compatible provider. Storage keys are private; all downloads go through the authenticated API.
 
 Start the web application in another terminal:
 

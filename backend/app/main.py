@@ -1,41 +1,55 @@
 from __future__ import annotations
 
 import asyncio
-import io
 import json
 import logging
 import re
 import time
 from collections import defaultdict, deque
+from contextlib import asynccontextmanager
 from uuid import uuid4
 from pathlib import Path
+from tempfile import NamedTemporaryFile
 from typing import Any
 
 import pandas as pd
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.sessions import SessionMiddleware
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from .assistant import answer_question
 from .analytics import _numeric_series, forecast, prepare_frame, profile_frame, scenario
 from .autopilot import briefing_markdown, build_report, clean_frame, explore, plan_prompt
 from .config import get_settings
+from .database import get_engine
 from .auth import authenticate_request, current_user_id
 from .auth_routes import router as auth_router
 from .models import AnalysisRequest, ChatRequest, ReportRequest, ScenarioRequest, SqlAskRequest, SqlRequest, TransformRequest
 from .pipeline import apply
 from .rag import extract, retrieve
 from .security import validate_readonly_sql
+from .storage import get_storage
 from .store import (
-    FILES, add_chunks, add_report, add_version, chunks_for, create_dataset, create_transformation,
+    add_chunks, add_report, add_version, chunks_for, create_dataset, create_transformation,
     event as record_event, events_for, finish_dataset, get_dataset, get_transformation, reports_for, resolve_transformation, activate_dataset_version,
 )
 
-app = FastAPI(title='Pivot Analytics API', version='1.2.0')
 settings = get_settings()
 logger = logging.getLogger(__name__)
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    settings.validate_production()
+    get_storage()
+    logger.info('Pivot started in %s mode', settings.app_env)
+    yield
+    get_engine().dispose()
+
+
+app = FastAPI(title='Pivot Analytics API', version='1.2.0', lifespan=lifespan)
 cors_origins = sorted({origin.strip() for origin in settings.cors_origins.split(',') if origin.strip()})
 app.add_middleware(SessionMiddleware, secret_key=settings.jwt_secret or 'development-only-oauth-state-secret', https_only=settings.cookie_secure, same_site='lax')
 app.add_middleware(CORSMiddleware, allow_origins=cors_origins, allow_credentials=True, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Authorization'])
@@ -126,12 +140,8 @@ ALLOWED_UPLOAD_TYPES = {
     'application/vnd.apache.parquet', 'application/x-parquet',
 }
 ALLOWED_CONTEXT_TYPES = {'application/octet-stream', 'application/pdf', 'text/plain', 'text/markdown', 'application/json'}
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-
-
-def _absolute_path(value: str | Path) -> Path:
-    path = Path(value)
-    return path if path.is_absolute() else PROJECT_ROOT / path
+MAX_UPLOAD_BYTES = settings.upload_max_bytes
+MAX_UPLOAD_ROWS = settings.upload_max_rows
 
 
 def _dataset_or_404(dataset_id: str) -> dict:
@@ -146,8 +156,7 @@ def _validate_upload_name(filename: str) -> None:
         raise HTTPException(400, 'Invalid file name.')
 
 
-def _read_bytes(raw: bytes, suffix: str) -> pd.DataFrame:
-    source = io.BytesIO(raw)
+def _read_file(source: Path, suffix: str) -> pd.DataFrame:
     if suffix in ('.xlsx', '.xls'):
         return pd.read_excel(source)
     if suffix == '.json':
@@ -158,19 +167,11 @@ def _read_bytes(raw: bytes, suffix: str) -> pd.DataFrame:
 
 
 def _read_source(item: dict) -> pd.DataFrame:
-    path = _absolute_path(item.get('active_path') or item['source_path'])
-    if not path.exists():
-        raise HTTPException(404, 'The preserved source file is unavailable.')
-    suffix = path.suffix.lower()
     try:
-        if suffix in ('.xlsx', '.xls'):
-            frame = pd.read_excel(path)
-        elif suffix == '.json':
-            frame = pd.read_json(path)
-        elif suffix == '.parquet':
-            frame = pd.read_parquet(path)
-        else:
-            frame = pd.read_csv(path)
+        with get_storage().local_file(item.get('active_path') or item['source_path']) as path:
+            if not path.exists():
+                raise FileNotFoundError(path)
+            frame = _read_file(path, path.suffix.lower())
     except Exception as error:
         raise HTTPException(422, f'Could not read the preserved source: {error}') from error
     frame = prepare_frame(frame)
@@ -179,6 +180,23 @@ def _read_source(item: dict) -> pd.DataFrame:
         if column in frame.columns:
             frame[column] = _numeric_series(frame, column)
     return frame
+
+
+def _save_frame(item: dict, frame: pd.DataFrame, name: str) -> str:
+    key = get_storage().key(item['owner_user_id'], item['id'], name, '.csv')
+    with NamedTemporaryFile(suffix='.csv') as handle:
+        frame.to_csv(handle.name, index=False)
+        get_storage().upload_file(Path(handle.name), key)
+    return key
+
+
+def _save_text(item: dict, text: str, name: str, suffix: str) -> str:
+    key = get_storage().key(item['owner_user_id'], item['id'], name, suffix)
+    with NamedTemporaryFile(suffix=suffix, mode='w', encoding='utf-8') as handle:
+        handle.write(text)
+        handle.flush()
+        get_storage().upload_file(Path(handle.name), key)
+    return key
 
 
 def _profile_payload(frame: pd.DataFrame, filename: str, dataset_id: str) -> dict[str, Any]:
@@ -346,6 +364,12 @@ def _gemini_sql(question: str, item: dict) -> str | None:
 
 @app.get('/health')
 def health():
+    try:
+        with get_engine().connect() as connection:
+            connection.exec_driver_sql('SELECT 1')
+    except Exception as error:
+        logger.warning('Readiness check failed: %s', type(error).__name__)
+        raise HTTPException(503, 'Database is unavailable.') from error
     return {'status': 'ok', 'service': 'pivot-analytics'}
 
 
@@ -359,19 +383,30 @@ async def profile(file: UploadFile = File(...)):
         raise HTTPException(415, 'Supported files are CSV, Excel, JSON, and Parquet.')
     if file.content_type not in ALLOWED_UPLOAD_TYPES:
         raise HTTPException(415, 'The uploaded content type is not supported.')
-    data = await file.read(MAX_UPLOAD_BYTES + 1)
-    if len(data) > MAX_UPLOAD_BYTES:
-        raise HTTPException(413, 'Files must be 50MB or smaller.')
-    try:
-        frame = prepare_frame(_read_bytes(data, suffix))
-    except Exception as error:
-        raise HTTPException(422, f'Could not read file: {error}') from error
-    if frame.empty:
-        raise HTTPException(422, 'The uploaded file contains no records.')
-    dataset_id = create_dataset(file.filename, suffix, data)
+    dataset_id = uuid4().hex
+    with NamedTemporaryFile(suffix=suffix) as handle:
+        size = 0
+        while chunk := await file.read(64 * 1024):
+            size += len(chunk)
+            if size > MAX_UPLOAD_BYTES:
+                raise HTTPException(413, f'Files must be {MAX_UPLOAD_BYTES // 1024 // 1024}MB or smaller.')
+            handle.write(chunk)
+        handle.flush()
+        try:
+            frame = prepare_frame(_read_file(Path(handle.name), suffix))
+        except Exception as error:
+            raise HTTPException(422, f'Could not read file: {error}') from error
+        if frame.empty:
+            raise HTTPException(422, 'The uploaded file contains no records.')
+        if len(frame) > MAX_UPLOAD_ROWS:
+            raise HTTPException(413, f'Datasets must contain {MAX_UPLOAD_ROWS:,} rows or fewer.')
+        user_id = current_user_id.get()
+        key = get_storage().key(user_id, dataset_id, 'source', suffix)
+        get_storage().upload_file(Path(handle.name), key)
+    create_dataset(file.filename, key, dataset_id)
     result = _profile_payload(frame, file.filename, dataset_id)
     context = [f'Dataset: {file.filename}', f'Role: {result["role"]}', f'Rows: {result["rows"]}', f'Columns: {", ".join(frame.columns.astype(str).tolist())}', frame.head(25).to_csv(index=False)]
-    add_chunks(dataset_id, file.filename, context + extract(file.filename, data))
+    add_chunks(dataset_id, file.filename, context)
     finish_dataset(dataset_id, result)
     return result
 
@@ -441,22 +476,20 @@ def run_autopilot(dataset_id: str):
     report = build_report(cleaned, cleaned_profile, steps, plan, facts)
 
     version_number = len(item['versions'])
-    output = FILES / f'{dataset_id}_version_{version_number}_autopilot.csv'
-    cleaned.to_csv(output, index=False)
+    output = _save_frame(item, cleaned, f'version-{version_number}-autopilot')
     detail = {
-        'output': str(output),
+        'output': output,
         'source_unchanged': True,
         'metrics': {'rows_before': len(source), 'rows_after': len(cleaned), 'steps': steps},
         'profile': cleaned_profile,
         'autopilot': report,
     }
     version_id = add_version(dataset_id, 'auto_pilot', json.dumps(detail))
-    activate_dataset_version(dataset_id, str(output), cleaned_profile)
+    activate_dataset_version(dataset_id, output, cleaned_profile)
 
     briefing = briefing_markdown(item['name'], report, cleaned_profile)
-    briefing_path = FILES / f'{dataset_id}_auto-pilot-briefing.md'
-    briefing_path.write_text(briefing, encoding='utf-8')
-    report_id = add_report(dataset_id, 'Auto Pilot briefing', 'md', str(briefing_path))
+    briefing_path = _save_text(item, briefing, 'auto-pilot-briefing', '.md')
+    report_id = add_report(dataset_id, 'Auto Pilot briefing', 'md', briefing_path)
 
     return {
         **report,
@@ -555,10 +588,8 @@ def preview_transformation(dataset_id: str, operation: str):
     except ValueError as error:
         raise HTTPException(422, str(error)) from error
     metrics = {**metrics, 'rows_before': len(source), 'rows_after': len(clean)}
-    transformation_id = create_transformation(dataset_id, operation, str(FILES / f'preview_{dataset_id}_{uuid4().hex}.csv'), metrics)
-    transformation = get_transformation(transformation_id)
-    preview_path = Path(transformation['preview_path'])
-    preview_path.write_text(clean.to_csv(index=False), encoding='utf-8')
+    preview_key = _save_frame(item, clean, f'preview-{uuid4().hex}')
+    transformation_id = create_transformation(dataset_id, operation, preview_key, metrics)
     before_preview = json.loads(
     source.head(8)
     .astype(object)
@@ -581,19 +612,19 @@ def approve_transformation(dataset_id: str, transformation_id: str):
     transformation = get_transformation(transformation_id)
     if not transformation or transformation['dataset_id'] != dataset_id or transformation['status'] != 'pending':
         raise HTTPException(404, 'Pending transformation preview not found.')
-    preview = Path(transformation['preview_path'])
-    if not preview.exists():
-        raise HTTPException(404, 'Transformation preview is unavailable.')
     version_number = len(item['versions'])
-    output = FILES / f'{dataset_id}_version_{version_number}.csv'
-    output.write_bytes(preview.read_bytes())
-    cleaned = pd.read_csv(output)
+    try:
+        with get_storage().local_file(transformation['preview_path']) as preview:
+            cleaned = pd.read_csv(preview)
+    except Exception as error:
+        raise HTTPException(404, 'Transformation preview is unavailable.') from error
+    output = _save_frame(item, cleaned, f'version-{version_number}')
     cleaned_profile = _profile_payload(cleaned, item['name'], dataset_id)
-    detail = {'output': str(output), 'metrics': transformation['metrics'], 'profile': cleaned_profile, 'source_unchanged': True}
+    detail = {'output': output, 'metrics': transformation['metrics'], 'profile': cleaned_profile, 'source_unchanged': True}
     version_id = add_version(dataset_id, f'executed:{transformation["operation"]}', json.dumps(detail))
-    activate_dataset_version(dataset_id, str(output), cleaned_profile)
+    activate_dataset_version(dataset_id, output, cleaned_profile)
     resolve_transformation(transformation_id, 'approved')
-    preview.unlink(missing_ok=True)
+    get_storage().delete(transformation['preview_path'])
     return {'ok': True, 'version': version_number, 'version_id': version_id, 'rows_before': transformation['metrics'].get('rows_before'), 'rows_after': transformation['metrics'].get('rows_after'), 'metrics': transformation['metrics'], 'output': str(output), 'profile': cleaned_profile, 'source_unchanged': True}
 
 
@@ -604,32 +635,32 @@ def activate_version(dataset_id: str, number: int):
     if not versions:
         raise HTTPException(404, 'Version not found.')
     if number == 0:
-        path = _absolute_path(item['source_path'])
+        path = item['source_path']
         profile = _profile_payload(_read_source({**item, 'active_path': item['source_path']}), item['name'], dataset_id)
     else:
         detail = json.loads(versions[0]['detail'])
-        path = _absolute_path(detail['output'])
-        profile = detail.get('profile') or _profile_payload(pd.read_csv(path), item['name'], dataset_id)
-    if not path.exists() or path.parent.resolve() != FILES.resolve():
-        raise HTTPException(404, 'Version output is unavailable.')
-    activate_dataset_version(dataset_id, str(path), profile)
+        path = detail['output']
+        profile = detail.get('profile') or _profile_payload(_read_source({**item, 'active_path': path}), item['name'], dataset_id)
+    activate_dataset_version(dataset_id, path, profile)
     return {'ok': True, 'active_version': number, 'profile': profile}
 
 
 @app.get('/api/datasets/{dataset_id}/versions/compare')
 def compare_versions(dataset_id: str, from_version: int = 0, to_version: int = 0):
     item = _dataset_or_404(dataset_id)
-    def path_for(number: int) -> Path:
+    def path_for(number: int) -> str:
         if number == 0:
-            return _absolute_path(item['source_path'])
+            return item['source_path']
         version = next((value for value in item['versions'] if value['number'] == number), None)
         if not version:
             raise HTTPException(404, f'Version {number} not found.')
-        return Path(json.loads(version['detail'])['output'])
+        return json.loads(version['detail'])['output']
     before, after = path_for(from_version), path_for(to_version)
-    if not before.exists() or not after.exists():
+    try:
+        before_frame = _read_source({**item, 'active_path': before})
+        after_frame = _read_source({**item, 'active_path': after})
+    except HTTPException:
         raise HTTPException(404, 'One of the requested version outputs is unavailable.')
-    before_frame, after_frame = pd.read_csv(before), pd.read_csv(after)
     return {'from_version': from_version, 'to_version': to_version, 'rows_before': len(before_frame), 'rows_after': len(after_frame), 'columns_before': before_frame.columns.tolist(), 'columns_after': after_frame.columns.tolist(), 'added_columns': [column for column in after_frame.columns if column not in before_frame.columns], 'removed_columns': [column for column in before_frame.columns if column not in after_frame.columns]}
 
 
@@ -639,7 +670,7 @@ def reject_transformation(dataset_id: str, transformation_id: str):
     transformation = get_transformation(transformation_id)
     if not transformation or transformation['dataset_id'] != dataset_id or transformation['status'] != 'pending':
         raise HTTPException(404, 'Pending transformation preview not found.')
-    Path(transformation['preview_path']).unlink(missing_ok=True)
+    get_storage().delete(transformation['preview_path'])
     resolve_transformation(transformation_id, 'rejected')
     return {'ok': True, 'message': 'Transformation rejected; the source remains unchanged.'}
 
@@ -693,14 +724,12 @@ def download_version(dataset_id: str, number: int):
     if not versions:
         raise HTTPException(404, 'Version not found.')
     if number == 0:
-        path = _absolute_path(item['source_path'])
+        path = item['source_path']
     else:
         detail = json.loads(versions[0]['detail'])
-        path = _absolute_path(detail['output'])
-    if not path.exists() or path.parent.resolve() != FILES.resolve():
-        raise HTTPException(404, 'Generated output is unavailable.')
-    media_type = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' if path.suffix.lower() == '.xlsx' else 'application/octet-stream'
-    return FileResponse(path, filename=path.name, media_type=media_type)
+        path = detail['output']
+    filename = Path(path).name
+    return StreamingResponse(get_storage().stream(path), media_type='application/octet-stream', headers={'Content-Disposition': f'attachment; filename="{filename}"'})
 
 
 @app.post('/api/forecast')
@@ -1134,12 +1163,8 @@ def create_report(dataset_id: str, body: ReportRequest):
             content, media_type, suffix = f'<html><body><pre>{markdown}</pre></body></html>', 'text/html', 'html'
         else:
             content, media_type, suffix = markdown, 'text/markdown', 'md'
-    path = FILES / f'{dataset_id}_{safe_title}.{suffix}'
-    if suffix == 'pdf':
-        path.write_bytes(content.encode('latin-1'))
-    else:
-        path.write_text(content, encoding='utf-8')
-    report_id = add_report(dataset_id, body.title or 'Pivot report', format_name, str(path))
+    path = _save_text(item, content, safe_title, f'.{suffix}')
+    report_id = add_report(dataset_id, body.title or 'Pivot report', format_name, path)
     return {'id': report_id, 'title': body.title or 'Pivot report', 'format': format_name, 'download_url': f'/api/datasets/{dataset_id}/reports/{report_id}/download'}
 
 
@@ -1149,10 +1174,8 @@ def download_report(dataset_id: str, report_id: str):
     report = next((report for report in reports_for(dataset_id) if report['id'] == report_id), None)
     if not report:
         raise HTTPException(404, 'Report not found.')
-    path = Path(report['path'])
-    if not path.exists() or path.parent.resolve() != FILES.resolve():
-        raise HTTPException(404, 'Report file is unavailable.')
-    return FileResponse(path, filename=path.name)
+    path = report['path']
+    return StreamingResponse(get_storage().stream(path), headers={'Content-Disposition': f'attachment; filename="{Path(path).name}"'})
 
 
 @app.get('/api/datasets/{dataset_id}/search')

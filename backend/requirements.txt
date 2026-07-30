@@ -17,3 +17,4 @@ itsdangerous==2.2.0
 SQLAlchemy==2.0.36
 alembic==1.14.0
 psycopg[binary]==3.2.3
+boto3==1.35.93

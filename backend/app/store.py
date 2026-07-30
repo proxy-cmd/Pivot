@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime
-from pathlib import Path
 from uuid import uuid4
 
 from sqlalchemy import select
@@ -10,11 +9,6 @@ from sqlalchemy.orm import Session, selectinload
 
 from .database import get_session_factory
 from .db_models import Chunk, Dataset, DatasetEvent, RefreshSession, Report, Transformation, User, Version
-
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-ROOT = PROJECT_ROOT / 'data'
-FILES = ROOT / 'files'
-
 
 def _session() -> Session:
     return get_session_factory()()
@@ -37,13 +31,6 @@ def _owned_dataset(session: Session, dataset_id: str) -> Dataset:
 
 def _user_payload(user: User) -> dict:
     return {'id': user.id, 'google_id': user.google_id, 'email': user.email, 'full_name': user.full_name, 'avatar_url': user.avatar_url, 'created_at': user.created_at, 'updated_at': user.updated_at, 'last_login': user.last_login}
-
-
-def absolute_path(value: str | None) -> str | None:
-    if not value:
-        return value
-    path = Path(value)
-    return str(path if path.is_absolute() else PROJECT_ROOT / path)
 
 
 def get_user(user_id: str):
@@ -96,13 +83,10 @@ def event(dataset_id: str, kind: str, message: str):
         session.commit()
 
 
-def create_dataset(name: str, suffix: str, raw: bytes) -> str:
-    FILES.mkdir(parents=True, exist_ok=True)
-    dataset_id = uuid4().hex
-    path = FILES / f'{dataset_id}{suffix}'
-    path.write_bytes(raw)
+def create_dataset(name: str, source_key: str, dataset_id: str | None = None) -> str:
+    dataset_id = dataset_id or uuid4().hex
     with _session() as session:
-        session.add(Dataset(id=dataset_id, owner_user_id=_current_user_id(), name=name, source_path=str(path), active_path=str(path), status='processing'))
+        session.add(Dataset(id=dataset_id, owner_user_id=_current_user_id(), name=name, source_path=source_key, active_path=source_key, status='processing'))
         session.commit()
     event(dataset_id, 'ingest', 'Source file stored unchanged as version 0.')
     return dataset_id
@@ -119,7 +103,7 @@ def finish_dataset(dataset_id: str, profile: dict):
 
 
 def _dataset_payload(dataset: Dataset) -> dict:
-    item = {'id': dataset.id, 'owner_user_id': dataset.owner_user_id, 'name': dataset.name, 'source_path': absolute_path(dataset.source_path), 'active_path': absolute_path(dataset.active_path), 'created_at': dataset.created_at, 'profile': json.loads(dataset.profile) if dataset.profile else None, 'status': dataset.status}
+    item = {'id': dataset.id, 'owner_user_id': dataset.owner_user_id, 'name': dataset.name, 'source_path': dataset.source_path, 'active_path': dataset.active_path, 'created_at': dataset.created_at, 'profile': json.loads(dataset.profile) if dataset.profile else None, 'status': dataset.status}
     item['versions'] = [{'id': value.id, 'dataset_id': value.dataset_id, 'owner_user_id': value.owner_user_id, 'number': value.number, 'parent_id': value.parent_id, 'operation': value.operation, 'detail': value.detail, 'created_at': value.created_at} for value in sorted(dataset.versions, key=lambda value: value.number)]
     item['pending_transformations'] = [{'id': value.id, 'dataset_id': value.dataset_id, 'owner_user_id': value.owner_user_id, 'operation': value.operation, 'status': value.status, 'preview_path': value.preview_path, 'metrics': json.loads(value.metrics or '{}'), 'created_at': value.created_at, 'resolved_at': value.resolved_at} for value in sorted((value for value in dataset.transformations if value.status == 'pending'), key=lambda value: value.created_at, reverse=True)]
     item['active_version'] = 0

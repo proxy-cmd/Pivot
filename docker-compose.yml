@@ -27,6 +27,17 @@ services:
     tmpfs:
       - /tmp:rw,noexec,nosuid,size=128m
     depends_on:
+      migrate:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+
+  migrate:
+    build: .
+    command: ["alembic", "upgrade", "head"]
+    env_file:
+      - backend/.env
+    depends_on:
       postgres:
         condition: service_healthy
 

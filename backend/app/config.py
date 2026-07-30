@@ -1,4 +1,5 @@
 from functools import lru_cache
+from pathlib import Path
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -72,6 +73,8 @@ class Settings(BaseSettings):
 
     def require_database_url(self) -> str:
         if not self.database_url:
+            if self.app_env.lower() != 'production':
+                return f"sqlite:///{Path(__file__).resolve().parents[2] / 'data' / 'pivot.db'}"
             raise RuntimeError('DATABASE_URL must be configured.')
         return self.database_url
 

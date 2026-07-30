@@ -118,6 +118,27 @@ def test_business_context_is_attached_only_to_the_dataset_owner(isolated_store, 
         assert any('Active customer' in item['content'] for item in store.chunks_for(dataset_id))
 
 
+def test_dataset_upload_uses_a_closed_temporary_file_on_windows(isolated_store, monkeypatch, tmp_path):
+    monkeypatch.setenv('JWT_SECRET', 'test-jwt-secret-that-is-long-enough')
+    monkeypatch.setenv('GOOGLE_CLIENT_ID', 'test-client')
+    monkeypatch.setenv('GOOGLE_CLIENT_SECRET', 'test-secret')
+    monkeypatch.setenv('STORAGE_BACKEND', 'local')
+    monkeypatch.setenv('LOCAL_STORAGE_PATH', str(tmp_path / 'files'))
+    get_settings.cache_clear()
+    owner = create_user('upload-owner', 'upload@example.test')
+
+    from backend.app.main import app
+
+    client = TestClient(app)
+    response = client.post(
+        '/api/datasets',
+        headers={'Authorization': f"Bearer {issue_access_token(owner['id'])}"},
+        files={'file': ('sales.csv', b'value\n1\n2\n', 'text/csv')},
+    )
+    assert response.status_code == 200
+    assert response.json()['rows'] == 2
+
+
 def test_security_config_rejects_weak_jwt_secret():
     with pytest.raises(ValueError):
         Settings(jwt_secret='too-short').validate_auth_security()

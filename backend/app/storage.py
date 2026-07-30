@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import shutil
+import os
 from contextlib import contextmanager
 from pathlib import Path
-from tempfile import NamedTemporaryFile
+from tempfile import mkstemp
 from typing import BinaryIO, Iterator
 
 from .config import get_settings
@@ -41,8 +42,9 @@ class Storage:
             yield self.root / key
             return
         suffix = Path(key).suffix
-        with NamedTemporaryFile(suffix=suffix, delete=False) as handle:
-            path = Path(handle.name)
+        descriptor, name = mkstemp(suffix=suffix)
+        os.close(descriptor)
+        path = Path(name)
         try:
             self.client.download_file(self.settings.storage_bucket, key, str(path))
             yield path

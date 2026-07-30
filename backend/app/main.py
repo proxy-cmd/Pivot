@@ -3,13 +3,14 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import re
 import time
 from collections import defaultdict, deque
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 from uuid import uuid4
 from pathlib import Path
-from tempfile import NamedTemporaryFile
+from tempfile import mkstemp
 from typing import Any
 
 import pandas as pd
@@ -166,6 +167,17 @@ def _read_file(source: Path, suffix: str) -> pd.DataFrame:
     return pd.read_csv(source)
 
 
+@contextmanager
+def _temporary_path(suffix: str):
+    descriptor, name = mkstemp(suffix=suffix)
+    os.close(descriptor)
+    path = Path(name)
+    try:
+        yield path
+    finally:
+        path.unlink(missing_ok=True)
+
+
 def _read_source(item: dict) -> pd.DataFrame:
     try:
         with get_storage().local_file(item.get('active_path') or item['source_path']) as path:
@@ -184,18 +196,17 @@ def _read_source(item: dict) -> pd.DataFrame:
 
 def _save_frame(item: dict, frame: pd.DataFrame, name: str) -> str:
     key = get_storage().key(item['owner_user_id'], item['id'], name, '.csv')
-    with NamedTemporaryFile(suffix='.csv') as handle:
-        frame.to_csv(handle.name, index=False)
-        get_storage().upload_file(Path(handle.name), key)
+    with _temporary_path('.csv') as path:
+        frame.to_csv(path, index=False)
+        get_storage().upload_file(path, key)
     return key
 
 
 def _save_text(item: dict, text: str, name: str, suffix: str) -> str:
     key = get_storage().key(item['owner_user_id'], item['id'], name, suffix)
-    with NamedTemporaryFile(suffix=suffix, mode='w', encoding='utf-8') as handle:
-        handle.write(text)
-        handle.flush()
-        get_storage().upload_file(Path(handle.name), key)
+    with _temporary_path(suffix) as path:
+        path.write_text(text, encoding='utf-8')
+        get_storage().upload_file(path, key)
     return key
 
 
@@ -384,16 +395,16 @@ async def profile(file: UploadFile = File(...)):
     if file.content_type not in ALLOWED_UPLOAD_TYPES:
         raise HTTPException(415, 'The uploaded content type is not supported.')
     dataset_id = uuid4().hex
-    with NamedTemporaryFile(suffix=suffix) as handle:
+    with _temporary_path(suffix) as path:
         size = 0
-        while chunk := await file.read(64 * 1024):
-            size += len(chunk)
-            if size > MAX_UPLOAD_BYTES:
-                raise HTTPException(413, f'Files must be {MAX_UPLOAD_BYTES // 1024 // 1024}MB or smaller.')
-            handle.write(chunk)
-        handle.flush()
+        with path.open('wb') as handle:
+            while chunk := await file.read(64 * 1024):
+                size += len(chunk)
+                if size > MAX_UPLOAD_BYTES:
+                    raise HTTPException(413, f'Files must be {MAX_UPLOAD_BYTES // 1024 // 1024}MB or smaller.')
+                handle.write(chunk)
         try:
-            frame = prepare_frame(_read_file(Path(handle.name), suffix))
+            frame = prepare_frame(_read_file(path, suffix))
         except Exception as error:
             raise HTTPException(422, f'Could not read file: {error}') from error
         if frame.empty:
@@ -402,7 +413,7 @@ async def profile(file: UploadFile = File(...)):
             raise HTTPException(413, f'Datasets must contain {MAX_UPLOAD_ROWS:,} rows or fewer.')
         user_id = current_user_id.get()
         key = get_storage().key(user_id, dataset_id, 'source', suffix)
-        get_storage().upload_file(Path(handle.name), key)
+        get_storage().upload_file(path, key)
     create_dataset(file.filename, key, dataset_id)
     result = _profile_payload(frame, file.filename, dataset_id)
     context = [f'Dataset: {file.filename}', f'Role: {result["role"]}', f'Rows: {result["rows"]}', f'Columns: {", ".join(frame.columns.astype(str).tolist())}', frame.head(25).to_csv(index=False)]

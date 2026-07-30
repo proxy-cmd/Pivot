@@ -1,7 +1,9 @@
 from pathlib import Path
 
 import pytest
+from fastapi import HTTPException
 
+from backend.app.auth import require_auth_database
 from backend.app.config import Settings
 from backend.app.storage import Storage
 
@@ -33,4 +35,13 @@ def test_local_storage_keeps_keys_inside_its_root(tmp_path, monkeypatch):
     with storage.local_file(key) as saved:
         assert saved == tmp_path / Path(key)
         assert saved.read_text(encoding='utf-8') == 'value\n1\n'
+    get_settings.cache_clear()
+
+
+def test_auth_fails_before_google_redirect_without_a_database(monkeypatch):
+    monkeypatch.delenv('DATABASE_URL', raising=False)
+    from backend.app.config import get_settings
+    get_settings.cache_clear()
+    with pytest.raises(HTTPException, match='DATABASE_URL'):
+        require_auth_database()
     get_settings.cache_clear()

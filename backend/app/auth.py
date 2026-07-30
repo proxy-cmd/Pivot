@@ -28,6 +28,13 @@ def require_auth_configuration() -> None:
         raise HTTPException(503, f'Authentication is unavailable: {error}') from error
 
 
+def require_auth_database() -> None:
+    try:
+        get_settings().require_database_url()
+    except RuntimeError as error:
+        raise HTTPException(503, 'Authentication is unavailable: DATABASE_URL must be configured.') from error
+
+
 def issue_access_token(user_id: str) -> str:
     settings = get_settings()
     require_auth_configuration()

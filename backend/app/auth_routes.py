@@ -8,7 +8,7 @@ from authlib.integrations.starlette_client import OAuth
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import RedirectResponse, Response
 
-from .auth import authenticate_request, issue_access_token, new_refresh_token, require_auth_configuration, token_digest
+from .auth import authenticate_request, issue_access_token, new_refresh_token, require_auth_configuration, require_auth_database, token_digest
 from .config import get_settings
 from .store import consume_refresh_session, create_refresh_session, revoke_refresh_session, upsert_google_user
 
@@ -43,6 +43,7 @@ def _require_trusted_origin(request: Request) -> None:
 @router.get('/google/login')
 async def google_login(request: Request):
     require_auth_configuration()
+    require_auth_database()
     client = _oauth().create_client('google')
     return await client.authorize_redirect(request, get_settings().google_redirect_uri)
 

@@ -417,7 +417,7 @@ def answer_question(question: str, frame: pd.DataFrame, profile: dict[str, Any],
         values["__metric"] = _numeric_series(values, metric)
         grouped = values.groupby(dimension, dropna=False)["__metric"].agg(["sum", "count"]).reset_index().rename(columns={"sum": "value"})
         grouped[dimension] = grouped[dimension].fillna("(blank)").astype(str)
-        descending = not any(word in normalized for word in ("lowest", "bottom", "least", "smallest"))
+        descending = not any(word in normalized for word in ("lowest", "bottom", "least", "smallest", "losing", "loss", "negative", "worst", "underperforming"))
         grouped = grouped.sort_values("value", ascending=not descending).head(20)
         top = grouped.iloc[0]
         direction = "highest" if descending else "lowest"

@@ -54,7 +54,15 @@ export async function request(path, options = {}) {
     return response.data
   } catch (error) {
     if (!error.response) throw new Error('Cannot reach the Pivot API. Start it with "npm run api".')
-    throw new Error(error.response.data?.detail || `Request failed (${error.response.status}).`)
+    const detail = error.response.data?.detail
+    const message = typeof detail === 'string'
+      ? detail
+      : Array.isArray(detail)
+        ? detail.map(item => item?.msg || item?.message || String(item)).join(' ')
+        : detail && typeof detail === 'object'
+          ? detail.message || detail.error || detail.reason || `Request failed (${error.response.status}).`
+          : `Request failed (${error.response.status}).`
+    throw new Error(message)
   }
 }
 
@@ -72,6 +80,8 @@ export async function downloadFile(path) {
     URL.revokeObjectURL(link.href)
   } catch (error) {
     if (!error.response) throw new Error('Cannot reach the Pivot API. Start it with "npm run api".')
-    throw new Error(error.response.data?.detail || `Download failed (${error.response.status}).`)
+    const detail = error.response.data?.detail
+    const message = typeof detail === 'string' ? detail : detail?.message || detail?.error || `Download failed (${error.response.status}).`
+    throw new Error(message)
   }
 }

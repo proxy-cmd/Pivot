@@ -312,6 +312,21 @@ def answer_question(question: str, frame: pd.DataFrame, profile: dict[str, Any],
             "conversation_context": context_summary,
         }
 
+    # --- Dataset orientation ---
+    if any(phrase in normalized for phrase in ("what is this data", "what this data", "what is this dataset", "describe this data", "describe this dataset", "data about", "data is all about", "dataset about", "tell me about this data")):
+        dimensions = [str(column) for column in frame.columns if column not in dates and column not in numeric]
+        field_summary = []
+        if dates:
+            field_summary.append(f"{len(dates)} date field{'s' if len(dates) != 1 else ''} ({', '.join(dates[:3])})")
+        if numeric:
+            field_summary.append(f"{len(numeric)} numeric measure{'s' if len(numeric) != 1 else ''} ({', '.join(numeric[:4])})")
+        if dimensions:
+            field_summary.append(f"{len(dimensions)} descriptive field{'s' if len(dimensions) != 1 else ''} ({', '.join(dimensions[:4])})")
+        issues = profile.get("issues", [])
+        quality_note = f" It currently has {len(issues)} detected quality finding(s) to review." if issues else " No profile-level quality findings are currently detected."
+        answer = f"This dataset has {len(frame):,} rows and {len(frame.columns):,} fields. It contains " + ("; ".join(field_summary) if field_summary else "fields that Pivot could not confidently classify") + "." + quality_note
+        return {"answer": answer, "insights": ["Ask a specific question about a field, a group, a time period, or data quality to investigate further."], "visualization": None, "rows": [], "sql": None, "intent": "dataset_orientation", "evidence": base | {"dates": dates, "numeric": numeric, "dimensions": dimensions[:20]}}
+
     # --- Quality questions ---
     if any(word in normalized for word in ("quality", "missing", "duplicate", "duplicates", "clean", "messy", "null")):
         issues = profile.get("issues", [])
@@ -365,7 +380,7 @@ def answer_question(question: str, frame: pd.DataFrame, profile: dict[str, Any],
         return {"answer": f"The active dataset contains {count:,} rows and {len(frame.columns):,} columns.", "insights": [], "visualization": None, "rows": [{"rows": count, "columns": len(frame.columns)}], "sql": "SELECT COUNT(*) AS rows FROM dataset", "intent": "profile", "evidence": base}
 
     # --- Drop / Decline analysis ---
-    drop_question = any(word in normalized for word in ("drop", "dropped", "decline", "declined", "fell", "fall", "decrease", "decreased", "worst month", "lowest month", "went down", "low"))
+    drop_question = any(word in normalized for word in ("drop", "dropped", "decline", "declined", "fell", "fall", "decrease", "decreased", "worst month", "lowest month", "went down", "go down", "goes down", "low"))
     if drop_question and date_column and metric:
         periods, cadence = _period_values(frame, date_column, metric, question)
         periods["previous"] = periods["value"].shift(1).round(2)

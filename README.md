@@ -1,283 +1,241 @@
-# Pivot
+# ⚡ PIVOT | AI-Powered Business Intelligence Platform
 
-> AI-powered Business Intelligence platform for exploring, cleaning, and analyzing datasets.
+> **Local-First, Metadata-Driven Business Intelligence, Automated Data Profiling, Versioned Data Cleaning, and Grounded RAG AI Analytics.**
 
-Pivot is an AI-powered Business Intelligence platform that helps users understand their data without writing repetitive code.
-
-Upload a **CSV**, **Excel**, **JSON**, or **Parquet** file, and Pivot automatically profiles the dataset, detects quality issues, generates insights, and lets you explore the data using natural language or SQL.
-
-Instead of modifying the uploaded dataset, Pivot preserves the original file and creates new versions whenever transformations are applied, making every change traceable and reproducible.
-
----
-
-## Features
-
-### Auto Pilot
-
-Auto Pilot turns a new dataset into a complete first-pass briefing with one action.
-
-It first runs a safe local analysis across usable numeric fields, dimensions, time series, distributions, correlations, and quality risks. When `GEMINI_API_KEY` is configured, it makes one compact planning call using this calculated schema context to select the most useful analysis focus, KPIs, charts, and next checks. Pivot validates every selected field and calculates every displayed number locally.
-
-Each run:
-
-- Standardizes safe formats, removes exact duplicates, and normalizes headers
-- Creates and activates a traceable cleaned dataset version
-- Preserves the original upload unchanged
-- Produces KPI cards, trends, comparisons, distributions, findings, and analysis coverage
-- Creates a downloadable Markdown executive briefing
-
-Auto Pilot does not automatically fill missing values or remove outliers because those changes need business review. Without a Gemini key, it still completes the local investigation and uses the detected dataset structure as its plan.
+![Python](https://img.shields.io/badge/Python-3.10%2B-blue.svg)
+![FastAPI](https://img.shields.io/badge/Framework-FastAPI-green.svg)
+![React](https://img.shields.io/badge/Frontend-React%20%2B%20Vite-61dafb.svg)
+![Recharts](https://img.shields.io/badge/Library-Recharts-red.svg)
+![Database](https://img.shields.io/badge/Database-SQLite%20%2F%20PostgreSQL-blue.svg)
+![AI](https://img.shields.io/badge/AI-Google%20Gemini%20RAG-orange.svg)
+![License](https://img.shields.io/badge/License-MIT-success.svg)
 
 ---
 
-### 📂 Upload & Profile
+## 📌 Executive Overview
 
-- Upload CSV and Excel datasets
-- Automatic schema detection
-- Column profiling
-- Missing value analysis
-- Duplicate detection
-- Statistical summaries
-- Dataset overview
+**Pivot** is an advanced, local-first Business Intelligence (BI) and Data Operations platform designed to help business leaders, analysts, and data scientists explore, clean, profile, and analyze complex datasets without writing repetitive boilerplate code.
 
----
-
-### 🧹 Data Cleaning
-
-Preview and apply common cleaning operations.
-
-Current transformations include:
-
-- Trim whitespace
-- Remove duplicates
-- Parse dates
-- Fill missing values
-- Normalize text
-- Detect outliers
-
-Every transformation creates a new dataset version while keeping the original file unchanged.
+Unlike traditional dashboards or cloud-only SaaS tools that overwrite source files or return ungrounded AI guesses, **Pivot gives every business dataset a memory**:
+- **Source Preservation**: Uploaded files (**CSV**, **Excel**, **JSON**, **Parquet**) are stored as immutable **Version 0 (Source of Truth)**.
+- **Traceable Version Lineage**: Every data transformation creates a new, distinct dataset version node, making all changes 100% reproducible and auditable.
+- **Grounded RAG AI Analyst**: Answers questions using local dataset metadata and indexed business context documents (PDFs, glossaries), eliminating AI hallucinations.
 
 ---
 
-### 🤖 AI Analyst
+## 🎯 Key Features & Capabilities
 
-Pivot includes an AI-powered chatbot that understands your dataset using a **Retrieval-Augmented Generation (RAG)** pipeline.
+```
+┌───────────────────┐     ┌───────────────────┐     ┌─────────────────────┐
+│ 1. Ingestion &    │ ──> │ 2. Quality Engine │ ──> │ 3. Deterministic    │
+│    Auto Profiling │     │    & Diagnostics  │     │    Data Cleaning    │
+└───────────────────┘     └───────────────────┘     └─────────────────────┘
+                                                               │
+                                                               ▼
+┌───────────────────┐     ┌───────────────────┐     ┌─────────────────────┐
+│ 6. Versioned      │ <── │ 5. Read-Only SQL  │ <── │ 4. Grounded RAG     │
+│    Lineage Node   │     │    Guard & Engine │     │    AI Analyst Chat  │
+└───────────────────┘     └───────────────────┘     └─────────────────────┘
+```
 
-Instead of answering from general knowledge, Pivot retrieves the most relevant dataset context before generating a response, making answers grounded in your uploaded data.
-
-You can ask questions like:
-
-> Which region generated the highest revenue?
-
-> Show monthly sales trends.
-
-> Which products are underperforming?
-
-> Find duplicate customer records.
-
-> Fill missing values and generate a cleaned dataset.
-
-> Explain why sales dropped in March.
-
-Depending on the request, Pivot can:
-
-- Answer questions about the dataset
-- Generate charts and summaries
-- Identify trends and anomalies
-- Compare metrics across categories
-- Detect data quality issues
-- Suggest and apply data cleaning operations
-- Create new dataset versions
-- Generate read-only SQL queries
-- Explain how results were calculated
-
-When deterministic analysis isn't sufficient, Gemini can be used as an optional fallback while remaining grounded through the RAG retrieval pipeline.
+### ⚡ 1. Auto Pilot & Executive Briefings
+- **One-Click Dataset Profiling**: In a single action, Auto Pilot scans numerical distributions, time series trends, dimensional correlations, and quality risks.
+- **Deterministic Schema Planning**: Combines local statistical profiling with compact LLM planning (`GEMINI_API_KEY`) to select top KPIs, trends, and risk indicators.
+- **Downloadable Executive Reports**: Automatically generates downloadable **Markdown**, **CSV**, and **PDF** briefings for executive decision-makers.
 
 ---
 
-### 🧠 Retrieval-Augmented Generation (RAG)
-
-For every uploaded dataset, Pivot builds a searchable knowledge base using dataset metadata, profiling information, and processed content.
-
-When a question is asked, the system:
-
-1. Retrieves the most relevant dataset context.
-2. Combines it with metadata and profiling information.
-3. Sends only the relevant context to the AI model.
-4. Generates a grounded response based on the retrieved data.
-
-This approach reduces hallucinations and keeps responses focused on the uploaded dataset rather than relying on general knowledge.
-
-### Business context
-
-Attach a PDF, Markdown, text, or JSON business glossary from the AI Analyst. Pivot indexes the readable content in the dataset's private context, so questions can use definitions such as how your company defines an active customer or revenue.
-
-### Private workspaces
-
-- Google OAuth sign-in with short-lived access tokens and rotated refresh sessions
-- Dataset, report, version, transformation, event, and RAG-context ownership enforced on every API request
-- PostgreSQL-ready SQLAlchemy persistence with Alembic migrations
+### 📂 2. Data Ingestion & Automated Profiling
+- **Format Flexibility**: Ingest **CSV**, **Excel (.xlsx, .xls)**, **JSON**, and **Parquet** files up to 50MB.
+- **Semantic Role Inference**: Automatically detects column data types, currency fields, time dimensions, primary-key candidates, and PII flags.
+- **Transparent Quality Scoring**: Uses a deterministic, penalty-based scoring formula to calculate completeness, consistency, and uniqueness scores.
 
 ---
 
-### 📊 Analytics
+### 🧹 3. Deterministic Data Cleaning & Version Control
+Preview and apply 7 core data transformations:
+1. **Trim Whitespace**: Cleans leading and trailing string padding.
+2. **Remove Duplicates**: Drops exact row-level duplicate entries.
+3. **Normalize Headers**: Converts messy column names into clean `snake_case`.
+4. **Parse & Standardize Dates**: Converts multi-format date strings into standard `YYYY-MM-DD`.
+5. **Fill Missing Values**: Imputes missing numerical values with median and categoricals with mode.
+6. **Remove Outliers**: Excludes statistical anomalies exceeding $1.5 \times \text{IQR}$.
+7. **Combined Standardization**: Executes a complete multi-step cleaning pipeline.
 
-Generate:
-
-- KPI summaries
-- Trend analysis
-- Rankings
-- Correlation analysis
-- Forecasting
-- Business Health Score
-- Scenario Analysis
-- Anomaly Detection
-
----
-
-### 🗄 SQL Workspace
-
-Run SQL directly on the uploaded dataset.
-
-Supported:
-
-- `SELECT`
-- `WITH` (CTEs)
-
-Blocked:
-
-- `INSERT`
-- `UPDATE`
-- `DELETE`
-- `DROP`
-- `ALTER`
-- `CREATE`
+> 🔒 **Lineage Guarantee**: Original raw files are *never modified*. Every approved transformation outputs a new versioned file registered in the SQLite metadata catalog (`data/pivot.db`).
 
 ---
 
-### 📝 Version History
-
-Every approved transformation creates a new dataset version.
-
-Track every modification while preserving the original uploaded file.
-
----
-
-## Tech Stack
-
-### Frontend
-
-- React
-- Vite
-- Recharts
-
-### Backend
-
-- FastAPI
-- Pandas
-- NumPy
-- Scikit-learn
-- PostgreSQL (production) / SQLite (tests)
-
-### AI
-
-- Google Gemini API (Runtime)
-- OpenAI GPT-5.5 & GPT-5.6 (Luna & Terra) for development, debugging, code review, and implementation assistance
-- TF-IDF Retrieval
-- Retrieval-Augmented Generation (RAG)
+### 🤖 4. AI Analyst & Grounded RAG Chat
+- **Retrieval-Augmented Generation (RAG)**: Indexes dataset schemas, column profiles, sample rows, and custom business glossaries (PDF, JSON, Markdown).
+- **Context-Grounded Answers**: Retrieves the most relevant dataset chunks via TF-IDF search before calling Gemini, citing exact column sources and avoiding hallucinations.
+- **Interactive Recharts Generation**: Returns dynamically rendered bar charts, line trends, and key metrics directly in the chat window.
 
 ---
 
-## Project Structure
+### 🗄️ 5. Read-Only SQL Workspace
+- **Direct Query Console**: Run raw SQL queries against uploaded datasets in real time.
+- **AST Safety Guard (`security.py`)**: Strict query validation allows only read-only statements (`SELECT`, `WITH` CTEs) while blocking unsafe DDL/DML operations (`INSERT`, `UPDATE`, `DELETE`, `DROP`, `ALTER`, `CREATE`).
+
+---
+
+### 📈 6. Predictive Analytics & Scenario Simulator
+- **Linear Regression Forecasting**: Predicts future metric trends with residual-based confidence bands.
+- **Financial Scenario Modeling**: Simulates business impacts from custom price adjustments, marketing spend changes, and supplier cost variations.
+
+---
+
+## 📸 Visual Tour & User Interface
+
+| Executive Dashboard & Auto Pilot | Data Quality Profiling & Issues |
+| :---: | :---: |
+| ![Dashboard Overview](images/Screenshot%202026-07-30%20152458.png) | ![Quality Profiling](images/Screenshot%202026-07-30%20153435.png) |
+
+| Data Cleaning & Row Preview | Grounded AI Analyst Chat |
+| :---: | :---: |
+| ![Data Cleaning](images/Screenshot%202026-07-30%20160400.png) | ![AI Analyst Chat](images/Screenshot%202026-07-30%20161908.png) |
+
+| SQL Workspace & Read-Only Guard | Version History & Lineage Node |
+| :---: | :---: |
+| ![SQL Console](images/Screenshot%202026-07-30%20162005.png) | ![Version Lineage](images/Screenshot%202026-07-30%20160928.png) |
+
+| Financial Scenario Simulator | Time-Series Forecasting |
+| :---: | :---: |
+| ![Scenario Simulator](images/Screenshot%202026-07-30%20162233.png) | ![Forecasting](images/Screenshot%202026-07-30%20162350.png) |
+
+---
+
+## 🏗️ Architecture & Codebase Map
 
 ```text
-frontend/
-backend/
-sample-data/
+d:\RPI Engine\
+├── backend/
+│   ├── app/
+│   │   ├── main.py           # FastAPI entrypoint, HTTP routers, multi-step AI Agent
+│   │   ├── assistant.py      # Analyst Calculation Engine & deterministic aggregations
+│   │   ├── analytics.py      # Statistical profiling, linear forecasting & scenario models
+│   │   ├── pipeline.py       # Deterministic data cleaning & versioned transformations
+│   │   ├── rag.py            # RAG chunking, indexing & TF-IDF retrieval engine
+│   │   ├── security.py       # AST SQL read-only safety validator
+│   │   ├── store.py          # SQLite persistence for datasets, versions, & events
+│   │   ├── config.py         # App configuration & Gemini settings
+│   │   └── models.py         # Pydantic validation schemas
+│   ├── data/
+│   │   ├── files/            # Versioned dataset storage (.csv, .parquet)
+│   │   └── pivot.db          # Metadata SQLite database
+│   └── requirements.txt      # Python dependencies
+├── src/
+│   ├── AppPolished.jsx       # Core React frontend state controller & viewport manager
+│   ├── main.jsx              # React mounting root
+│   ├── styles.css            # Dashboard dark/light styling theme
+│   └── utils.js              # Fetch wrappers & storage helpers
+├── Dockerfile                # Backend & frontend single-container build
+├── docker-compose.yml        # Docker compose service definition
+└── package.json              # Frontend dependencies & scripts
 ```
 
 ---
 
-## Getting Started
+## 💻 Tech Stack
 
-### Backend
+- **Frontend**: React 18, Vite, Recharts, Lucide Icons, Tailwind-inspired CSS styling.
+- **Backend API**: Python 3.10+, FastAPI, Uvicorn.
+- **Data Engine**: Pandas, NumPy, Scikit-learn (IsolationForest outliers & linear regression).
+- **Database & Persistence**: SQLite (`pivot.db`), SQLAlchemy, Alembic migrations.
+- **AI & RAG Engine**: Google Gemini API (Runtime), TF-IDF Scikit-learn Vectorizer, custom chunking.
 
+---
+
+## 🛠️ Getting Started
+
+### Prerequisites
+- Python 3.10 or higher
+- Node.js 18+ and `npm`
+
+---
+
+### Option A: Local Development Setup
+
+#### 1. Backend Setup
 ```bash
+# Navigate to project root
+cd "d:\RPI Engine"
+
+# Create and activate virtual environment
 python -m venv .venv
+.venv\Scripts\activate       # Windows
+# source .venv/bin/activate  # Linux/Mac
 
-# Windows
-.venv\Scripts\activate
-
+# Install dependencies
 pip install -r backend/requirements.txt
 
-python -m uvicorn backend.app.main:app --reload
+# Start FastAPI server
+python -m uvicorn backend.app.main:app --reload --port 8000
 ```
+- **API Documentation**: [http://localhost:8000/docs](http://localhost:8000/docs)
 
-### Frontend
-
+#### 2. Frontend Setup
 ```bash
+# In a new terminal window
+cd "d:\RPI Engine"
+
+# Install frontend dependencies
 npm install
 
+# Start Vite dev server
 npm run dev
 ```
+- **Web Dashboard**: [http://localhost:5173](http://localhost:5173)
 
-Frontend
+---
 
-```
-http://localhost:5173
-```
+### Option B: Docker Deployment
 
-Backend API
+Run the complete full-stack environment in Docker:
 
-```
-http://localhost:8000/docs
+```bash
+docker-compose up --build
 ```
 
 ---
 
-## Environment Variables
+## 🔑 Environment Variables Configuration
 
-Create:
-
-```
-backend/.env
-```
-
-Configure the database, Google OAuth, and optional Gemini key. Use [the setup guide](docs/SETUP.md) for local and Docker setup.
+Create a `backend/.env` file:
 
 ```env
-GEMINI_API_KEY=your_api_key
+# Optional Gemini API Key for AI Analyst & Auto Pilot reasoning
+GEMINI_API_KEY=your_google_gemini_api_key
+
+# Database Connection (Defaults to SQLite data/pivot.db)
+DATABASE_URL=sqlite:///data/pivot.db
 ```
 
-## Current limits
-
-Pivot uses Pandas for in-process profiling and analysis. The default upload limit is 50MB, which keeps a single API process responsive and avoids pretending that arbitrary-size files are safe on a laptop. For larger sources, the next production step is object storage plus a worker queue and a query engine such as DuckDB or warehouse connectors.
+> ℹ️ *Note: If `GEMINI_API_KEY` is not provided, Pivot will complete all local profiling, data cleaning, quality scoring, SQL queries, and forecasting deterministically!*
 
 ---
 
-## Roadmap
+## 🛡️ Security, Privacy & Integrity Guarantees
 
-- Interactive dashboards
-- Advanced lineage visualization
-- Database connectors
-- Scheduled reports
-- Scheduled workflow automation
-- Cloud storage support
-- Enterprise RBAC
+1. **Immutable Source Files**: Raw uploaded datasets (Version 0) are saved as read-only files on disk and can never be overwritten by API operations.
+2. **Read-Only SQL Protection**: SQL query parser blocks any `UPDATE`, `DELETE`, `INSERT`, `ALTER`, `DROP`, or `PRAGMA` command to prevent database tampering.
+3. **Deterministic Quality Metrics**: Dataset quality scores are computed using transparent statistical rules—never arbitrary or non-reproducible numbers.
+4. **Context-Bounded AI RAG**: AI answers are strictly bounded to retrieved chunks of your dataset and business glossaries, citing sources to eliminate hallucinations.
 
 ---
 
-## Built With
+## 🚀 Roadmap & Future Enhancements
 
-- React
-- FastAPI
-- Pandas
-- PostgreSQL
-- Scikit-learn
-- Gemini API
+- [ ] **PostgreSQL & MinIO Storage**: Replace SQLite and local files with PostgreSQL and S3/MinIO object storage for cloud scale.
+- [ ] **Enterprise RBAC & Authentication**: Add Google OAuth, user roles, workspace permissions, and audit logs.
+- [ ] **Database Connectors**: Direct connectors for PostgreSQL, MySQL, Snowflake, BigQuery, and DuckDB.
+- [ ] **Background Job Queues**: Redis + Celery/RQ for handling multi-gigabyte dataset ingestion and asynchronous jobs.
 
 ---
 
-## License
+## 📜 License
 
-MIT License.
+Distributed under the **MIT License**. See `LICENSE` for more information.
+
+---
+*Built with ❤️ for data-driven teams who want fast, reliable, and trustworthy business intelligence.*

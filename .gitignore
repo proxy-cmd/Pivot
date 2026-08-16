@@ -6,7 +6,6 @@ __pycache__/
 *.py[cod]
 .venv/
 data/
-images/
 explain.txt
 linkedin.txt
 exp.txt

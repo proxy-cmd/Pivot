@@ -89,19 +89,19 @@ Preview and apply 7 core data transformations:
 
 | Executive Dashboard & Auto Pilot | Data Quality Profiling & Issues |
 | :---: | :---: |
-| ![Dashboard Overview](images/Screenshot%202026-07-30%20152458.png) | ![Quality Profiling](images/Screenshot%202026-07-30%20153435.png) |
+| ![Dashboard Overview](<images/Screenshot 2026-07-30 152458.png>) | ![Quality Profiling](<images/Screenshot 2026-07-30 153435.png>) |
 
 | Data Cleaning & Row Preview | Grounded AI Analyst Chat |
 | :---: | :---: |
-| ![Data Cleaning](images/Screenshot%202026-07-30%20160400.png) | ![AI Analyst Chat](images/Screenshot%202026-07-30%20161908.png) |
+| ![Data Cleaning](<images/Screenshot 2026-07-30 160400.png>) | ![AI Analyst Chat](<images/Screenshot 2026-07-30 161908.png>) |
 
 | SQL Workspace & Read-Only Guard | Version History & Lineage Node |
 | :---: | :---: |
-| ![SQL Console](images/Screenshot%202026-07-30%20162005.png) | ![Version Lineage](images/Screenshot%202026-07-30%20160928.png) |
+| ![SQL Console](<images/Screenshot 2026-07-30 162005.png>) | ![Version Lineage](<images/Screenshot 2026-07-30 160928.png>) |
 
 | Financial Scenario Simulator | Time-Series Forecasting |
 | :---: | :---: |
-| ![Scenario Simulator](images/Screenshot%202026-07-30%20162233.png) | ![Forecasting](images/Screenshot%202026-07-30%20162350.png) |
+| ![Scenario Simulator](<images/Screenshot 2026-07-30 162233.png>) | ![Forecasting](<images/Screenshot 2026-07-30 162350.png>) |
 
 ---
 

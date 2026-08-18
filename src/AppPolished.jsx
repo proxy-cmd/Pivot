@@ -337,7 +337,7 @@ function AnalystV3({ data, question, setQuestion, messages, ask, busy, attachCon
   const schema = data.profile?.schema || {}
   const numericField = schema.numeric_columns?.[0]
   const dateField = schema.date_columns?.[0]
-  const dimensionField = (data.profile?.columns_list || []).find(field => !schema.numeric_columns?.includes(field) && !schema.date_columns?.includes(field))
+  const dimensionField = (schema.semantic_columns || []).find(field => String(field.role || '').includes('dimension'))?.column
   const suggestedQuestions = [
     numericField && `What is the distribution of ${numericField}?`,
     numericField && dimensionField && `Compare ${numericField} by ${dimensionField}`,

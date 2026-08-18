@@ -919,6 +919,12 @@ def chat_v2(body: ChatRequest):
         router_prompt = f"""You are the routing and analysis agent for Pivot, an intelligent data analyst platform.
 Your task is to analyze the user's question and determine the appropriate action.
 
+Identity policy:
+- You are always "Pivot Analyst" inside the Pivot product.
+- Do not claim to be Google, Gemini, or any other provider; do not mention underlying model providers.
+- Do not imply affiliation, endorsement, or ownership by any third party.
+- If asked who made you or what you are, describe yourself only as Pivot's evidence-first data analyst.
+
 Dataset Profile:
 {json.dumps(metadata, indent=2)}
 

@@ -24,6 +24,7 @@ from .autopilot import briefing_markdown, build_report, clean_frame, explore, pl
 from .config import get_settings
 from .database import get_engine
 from .dataset_analysis import run_analysis as run_dataset_analysis
+from .gemini import generate as call_gemini, parse_json_object as extract_json
 from .dataset_io import (
     available_analyses,
     overview_payload,
@@ -619,47 +620,6 @@ def chat(body: ChatRequest):
         detail = f" The first evidence rows are: {sample}." if sample else ''
         return {'answer': f"I found evidence in {item['name']} and returned {query_result.get('count', 0)} matching rows.{detail}", 'source': 'deterministic-evidence', 'sql': query, 'query_result': query_result, 'citations': sources}
     return {'answer': f"Hi — I’m connected to {item['name']}. I found {profile.get('rows', 0)} rows and {profile.get('columns', 0)} detected fields. Ask me about trends, quality, categories, or values and I’ll investigate the source.", 'source': 'dataset-aware', 'sql': query, 'citations': sources}
-
-
-def call_gemini(prompt: str) -> str | None:
-    settings = get_settings()
-    if not settings.gemini_api_key:
-        return None
-    try:
-        from google import genai
-        client = genai.Client(api_key=settings.gemini_api_key)
-        response = client.models.generate_content(
-            model=settings.gemini_model,
-            contents=prompt
-        )
-        return response.text
-    except Exception:
-        logger.warning('Gemini call failed.')
-        return None
-
-
-def extract_json(text: str) -> dict | None:
-    if not text:
-        return None
-    try:
-        # Find json block ```json ... ```
-        match = re.search(r'```json\s*(.*?)\s*```', text, re.DOTALL)
-        if match:
-            return json.loads(match.group(1).strip())
-        
-        # Try raw json parsing
-        cleaned = text.strip()
-        if cleaned.startswith('{') and cleaned.endswith('}'):
-            return json.loads(cleaned)
-            
-        # Try finding first { and last }
-        start = cleaned.find('{')
-        end = cleaned.rfind('}')
-        if start != -1 and end != -1:
-            return json.loads(cleaned[start:end+1])
-    except Exception:
-        pass
-    return None
 
 
 @app.post('/api/chat')

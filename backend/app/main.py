@@ -884,21 +884,6 @@ def chat_v2(body: ChatRequest):
     profile = item.get('profile') or {}
     question = body.question.strip()
     history = (body.context.get('history') or []) if isinstance(body.context, dict) else []
-    normalized_question = re.sub(r'[^a-z0-9]+', ' ', question.lower()).strip()
-    quick_replies = {
-        'hi': f"Hi — I’m Pivot Analyst. I’m ready to investigate {item['name']} with evidence from the active dataset.",
-        'hello': f"Hello — I’m Pivot Analyst. Ask me anything about {item['name']} and I’ll ground the answer in the data.",
-        'hey': f"Hey — I’m ready to explore {item['name']} with you.",
-        'how are you': "I’m ready to work. Ask me about a field, trend, group, data-quality finding, or an analysis you want to run.",
-        'how r u': "I’m ready to work. Ask me about a field, trend, group, data-quality finding, or an analysis you want to run.",
-        'who are you': "I’m Pivot Analyst, your evidence-first data assistant. I inspect the active dataset, run safe read-only calculations, and attach supporting evidence to data answers.",
-        'who r u': "I’m Pivot Analyst, your evidence-first data assistant. I inspect the active dataset, run safe read-only calculations, and attach supporting evidence to data answers.",
-        'what can you do': "I can explain the dataset, compare groups, calculate metrics, analyze trends and quality issues, create cleaning previews, and show the evidence behind each data answer.",
-        'thanks': "You’re welcome. What should we investigate next?",
-        'thank you': "You’re welcome. What should we investigate next?",
-    }
-    if normalized_question in quick_replies:
-        return {'answer': quick_replies[normalized_question], 'source': 'conversation', 'intent': 'conversation', 'sql': None, 'query_result': None, 'rows': [], 'insights': [], 'driver_rows': [], 'visualization': None, 'action': None, 'download_url': None, 'citations': [{'source': item['name'], 'score': 1.0}]}
     retrieved = retrieve(question, chunks_for(body.dataset_id))
     citations = [{'source': item['name'], 'score': 1.0}]
     citations.extend({'source': value['source'], 'score': value['score']} for value in retrieved)
@@ -908,6 +893,7 @@ def chat_v2(body: ChatRequest):
     sql_query = None
     cleaning_op = None
     reasoning = ""
+    conversation_answer = None
     
     if settings.gemini_api_key:
         columns_list = profile.get('columns_list', [])
@@ -948,7 +934,7 @@ You must choose one of the following intents:
    - For yearly/monthly trend grouping, use `strftime('%Y-%m', date_column)` or `strftime('%Y', date_column)`.
 2. "cleaning": The user wants to clean, format, normalize column names, parse dates, trim whitespace, fill missing nulls, remove duplicates, or handle outliers.
    - Set 'cleaning_operation' to one of: 'trim_text', 'remove_duplicates', 'normalize_columns', 'parse_dates', 'fill_missing', 'remove_outliers', 'standardize_format'.
-3. "general_chat": The user is greeting you ("hi", "hello"), thanking you ("thanks", "got it"), asking general questions about your identity, or asking a question that does not relate to this dataset.
+3. "general_chat": The user is having a general conversation or asking about Pivot rather than requesting a dataset operation. Write a direct, helpful response without inventing dataset facts.
 
 Respond ONLY with a JSON block in this exact format (no markdown except the json container):
 ```json
@@ -956,6 +942,7 @@ Respond ONLY with a JSON block in this exact format (no markdown except the json
   "intent": "query" | "cleaning" | "general_chat",
   "sql": "SELECT ...", // required only if intent is 'query'
   "cleaning_operation": "operation_name", // required only if intent is 'cleaning'
+  "answer": "A concise response", // required only if intent is 'general_chat'
   "reasoning": "Brief explanation of your decision"
 }}
 ```"""
@@ -967,7 +954,11 @@ Respond ONLY with a JSON block in this exact format (no markdown except the json
             intent = router_json.get('intent', 'general_chat')
             sql_query = router_json.get('sql')
             cleaning_op = router_json.get('cleaning_operation')
+            conversation_answer = router_json.get('answer')
             reasoning = router_json.get('reasoning', '')
+
+    if intent == 'general_chat' and isinstance(conversation_answer, str) and conversation_answer.strip():
+        return {'answer': conversation_answer.strip(), 'source': 'pivot-analyst', 'intent': 'conversation', 'sql': None, 'query_result': None, 'rows': [], 'insights': [], 'driver_rows': [], 'visualization': None, 'action': None, 'download_url': None, 'citations': citations}
 
     # --- Step 2: Intent Execution ---
     

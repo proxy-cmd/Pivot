@@ -334,6 +334,15 @@ function AnalystV3({ data, question, setQuestion, messages, ask, busy, attachCon
   const userInitials = initials(profile || {})
   const threadRef = useRef(null)
   const contextInput = useRef(null)
+  const schema = data.profile?.schema || {}
+  const numericField = schema.numeric_columns?.[0]
+  const dateField = schema.date_columns?.[0]
+  const dimensionField = (data.profile?.columns_list || []).find(field => !schema.numeric_columns?.includes(field) && !schema.date_columns?.includes(field))
+  const suggestedQuestions = [
+    numericField && `What is the distribution of ${numericField}?`,
+    numericField && dimensionField && `Compare ${numericField} by ${dimensionField}`,
+    numericField && dateField && `How has ${numericField} changed over time?`,
+  ].filter(Boolean)
   
   useEffect(() => {
     if (threadRef.current) {
@@ -356,11 +365,9 @@ function AnalystV3({ data, question, setQuestion, messages, ask, busy, attachCon
             <h2>What would you like to investigate?</h2>
             <p>Ask naturally: “Which product sales are highest?” or “Fix messy date formats and give me an updated CSV.”</p>
           </div>
-          <div className="suggested-prompts">
-            <button type="button" onClick={() => ask('Which product sales are highest?')}>Which product sales are highest? <ChevronRight size={14} /></button>
-            <button type="button" onClick={() => ask('When did sales drop the most, and what changed?')}>When did sales drop the most? <ChevronRight size={14} /></button>
-            <button type="button" onClick={() => ask('Fix the messy date formats and give me an updated CSV')}>Fix messy formats + export <ChevronRight size={14} /></button>
-          </div>
+          {suggestedQuestions.length > 0 && <div className="suggested-prompts">
+            {suggestedQuestions.map(prompt => <button type="button" onClick={() => ask(prompt)} key={prompt}>{prompt} <ChevronRight size={14} /></button>)}
+          </div>}
           <div className="chat-thread" ref={threadRef}>
             {messages.length === 0 ? (
               <div className="chat-empty">

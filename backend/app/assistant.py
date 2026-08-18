@@ -277,16 +277,6 @@ def answer_question(question: str, frame: pd.DataFrame, profile: dict[str, Any],
     base = _base(profile, frame)
     history = history or []
 
-    # --- Greetings ---
-    if normalized in {"hi", "hello", "hey", "hiya", "good morning", "good afternoon", "good evening"}:
-        return {"answer": f"Hi! I'm Pivot Analyst. I've loaded {len(frame):,} rows across {len(frame.columns)} columns. Ask me about trends, products, regions, quality, or any numeric field — I'll calculate the answer and show you the evidence.", "insights": [], "visualization": None, "rows": [], "sql": None, "intent": "conversation", "evidence": base}
-
-    if any(phrase in normalized for phrase in ("who are you", "what can you do", "what are you")):
-        return {"answer": "I'm Pivot Analyst — your AI data analyst. I can analyze trends, find top/bottom performers, explain what changed and why, detect quality issues, calculate aggregates, find correlations, forecast future values, and even clean your data. Just ask naturally!", "insights": [], "visualization": None, "rows": [], "sql": None, "intent": "conversation", "evidence": base}
-
-    if normalized in {"thanks", "thank you", "ok", "okay", "got it", "cool", "nice", "great", "perfect", "awesome"}:
-        return {"answer": "You're welcome! Ask me anything else about your data — I'm here to help.", "insights": [], "visualization": None, "rows": [], "sql": None, "intent": "conversation", "evidence": base}
-
     # --- "Why" / Explanation questions (uses conversation history) ---
     if _is_why_question(question) and history:
         why_result = _build_why_analysis(frame, profile, question, history)

@@ -448,6 +448,9 @@ function AnalystV3({ data, question, setQuestion, messages, ask, busy, attachCon
             />
             <div>
               <span><Sparkles size={14} /> Calculated from {data.file_name}</span>
+              <button type="button" className="chat-attach" onClick={() => contextInput.current?.click()} disabled={busy} aria-label="Attach business context">
+                <FileBarChart2 size={15} /> Context
+              </button>
               <button type="button" onClick={ask} disabled={busy || !question.trim()}>
                 {busy ? <RefreshCw size={14} className="spin" /> : <Send size={16} />}
               </button>

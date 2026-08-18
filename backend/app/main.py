@@ -884,6 +884,21 @@ def chat_v2(body: ChatRequest):
     profile = item.get('profile') or {}
     question = body.question.strip()
     history = (body.context.get('history') or []) if isinstance(body.context, dict) else []
+    normalized_question = re.sub(r'[^a-z0-9]+', ' ', question.lower()).strip()
+    quick_replies = {
+        'hi': f"Hi — I’m Pivot Analyst. I’m ready to investigate {item['name']} with evidence from the active dataset.",
+        'hello': f"Hello — I’m Pivot Analyst. Ask me anything about {item['name']} and I’ll ground the answer in the data.",
+        'hey': f"Hey — I’m ready to explore {item['name']} with you.",
+        'how are you': "I’m ready to work. Ask me about a field, trend, group, data-quality finding, or an analysis you want to run.",
+        'how r u': "I’m ready to work. Ask me about a field, trend, group, data-quality finding, or an analysis you want to run.",
+        'who are you': "I’m Pivot Analyst, your evidence-first data assistant. I inspect the active dataset, run safe read-only calculations, and attach supporting evidence to data answers.",
+        'who r u': "I’m Pivot Analyst, your evidence-first data assistant. I inspect the active dataset, run safe read-only calculations, and attach supporting evidence to data answers.",
+        'what can you do': "I can explain the dataset, compare groups, calculate metrics, analyze trends and quality issues, create cleaning previews, and show the evidence behind each data answer.",
+        'thanks': "You’re welcome. What should we investigate next?",
+        'thank you': "You’re welcome. What should we investigate next?",
+    }
+    if normalized_question in quick_replies:
+        return {'answer': quick_replies[normalized_question], 'source': 'conversation', 'intent': 'conversation', 'sql': None, 'query_result': None, 'rows': [], 'insights': [], 'driver_rows': [], 'visualization': None, 'action': None, 'download_url': None, 'citations': [{'source': item['name'], 'score': 1.0}]}
     retrieved = retrieve(question, chunks_for(body.dataset_id))
     citations = [{'source': item['name'], 'score': 1.0}]
     citations.extend({'source': value['source'], 'score': value['score']} for value in retrieved)

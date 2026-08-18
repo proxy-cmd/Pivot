@@ -380,7 +380,7 @@ def answer_question(question: str, frame: pd.DataFrame, profile: dict[str, Any],
         return {"answer": f"The active dataset contains {count:,} rows and {len(frame.columns):,} columns.", "insights": [], "visualization": None, "rows": [{"rows": count, "columns": len(frame.columns)}], "sql": "SELECT COUNT(*) AS rows FROM dataset", "intent": "profile", "evidence": base}
 
     # --- Drop / Decline analysis ---
-    drop_question = any(word in normalized for word in ("drop", "dropped", "decline", "declined", "fell", "fall", "decrease", "decreased", "worst month", "lowest month", "went down", "go down", "goes down", "low"))
+    drop_question = any(word in normalized for word in ("drop", "dropped", "decline", "declined", "fell", "fall", "decrease", "decreased", "worst month", "lowest month", "went down", "go down", "goes down"))
     if drop_question and date_column and metric:
         periods, cadence = _period_values(frame, date_column, metric, question)
         periods["previous"] = periods["value"].shift(1).round(2)
@@ -430,16 +430,33 @@ def answer_question(question: str, frame: pd.DataFrame, profile: dict[str, Any],
     if grouped_question and metric and dimension:
         values = frame.copy()
         values["__metric"] = _numeric_series(values, metric)
-        grouped = values.groupby(dimension, dropna=False)["__metric"].agg(["sum", "count"]).reset_index().rename(columns={"sum": "value"})
+        aggregation, sql_aggregation = "total", "SUM"
+        if any(word in normalized for word in ("average", "mean")):
+            aggregation, sql_aggregation = "average", "AVG"
+        elif "median" in normalized:
+            aggregation, sql_aggregation = "median", None
+        elif any(word in normalized for word in ("count", "how many", "number of", "records", "orders")):
+            aggregation, sql_aggregation = "count", "COUNT"
+        grouped_values = values.groupby(dimension, dropna=False)["__metric"]
+        if aggregation == "average":
+            grouped = grouped_values.agg(value="mean", count="count").reset_index()
+        elif aggregation == "median":
+            grouped = grouped_values.agg(value="median", count="count").reset_index()
+        elif aggregation == "count":
+            grouped = grouped_values.agg(value="count", count="count").reset_index()
+        else:
+            grouped = grouped_values.agg(value="sum", count="count").reset_index()
         grouped[dimension] = grouped[dimension].fillna("(blank)").astype(str)
         descending = not any(word in normalized for word in ("lowest", "bottom", "least", "smallest", "losing", "loss", "negative", "worst", "underperforming"))
         grouped = grouped.sort_values("value", ascending=not descending).head(20)
         top = grouped.iloc[0]
         direction = "highest" if descending else "lowest"
-        answer = f"{top[dimension]} has the {direction} {metric}: {top['value']:,.2f} across {int(top['count']):,} rows."
+        answer = f"{top[dimension]} has the {direction} {aggregation} {metric}: {top['value']:,.2f} across {int(top['count']):,} rows."
         rows = [{"group": str(row[dimension]), "value": round(float(row["value"]), 2), "rows": int(row["count"])} for _, row in grouped.iterrows()]
-        sql = f"SELECT {quote(dimension)} AS group_name, SUM({quote(metric)}) AS value, COUNT(*) AS rows FROM dataset GROUP BY {quote(dimension)} ORDER BY value {'DESC' if descending else 'ASC'} LIMIT 20"
-        return {"answer": answer, "insights": [f"The top group represents {top['value'] / grouped['value'].sum() * 100:.1f}% of the displayed group total."], "visualization": _chart("bar", f"{metric} by {dimension}", [{"label": row["group"], "value": row["value"]} for row in rows]), "rows": rows, "sql": sql, "intent": "breakdown", "evidence": base | {"dimension": dimension, "metric": metric}}
+        sql_value = f"{sql_aggregation}({quote(metric)})" if sql_aggregation else f"MEDIAN({quote(metric)})"
+        sql = f"SELECT {quote(dimension)} AS group_name, {sql_value} AS value, COUNT(*) AS rows FROM dataset GROUP BY {quote(dimension)} ORDER BY value {'DESC' if descending else 'ASC'} LIMIT 20"
+        insight = f"The top group represents {top['value'] / grouped['value'].sum() * 100:.1f}% of the displayed group total." if aggregation == "total" and grouped['value'].sum() else f"This comparison uses the {aggregation} for each group."
+        return {"answer": answer, "insights": [insight], "visualization": _chart("bar", f"{aggregation.title()} {metric} by {dimension}", [{"label": row["group"], "value": row["value"]} for row in rows]), "rows": rows, "sql": sql, "intent": "breakdown", "evidence": base | {"dimension": dimension, "metric": metric, "aggregation": aggregation}}
 
     # --- Simple aggregates ---
     if metric and any(word in normalized for word in ("sum", "total", "revenue", "sales", "amount", "average", "mean", "median", "maximum", "minimum", "max", "min")):

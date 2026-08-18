@@ -883,7 +883,7 @@ def chat_v2(body: ChatRequest):
     item = _dataset_or_404(body.dataset_id)
     profile = item.get('profile') or {}
     question = body.question.strip()
-    history = body.context.get('history') if isinstance(body.context, dict) else []
+    history = (body.context.get('history') or []) if isinstance(body.context, dict) else []
     retrieved = retrieve(question, chunks_for(body.dataset_id))
     citations = [{'source': item['name'], 'score': 1.0}]
     citations.extend({'source': value['source'], 'score': value['score']} for value in retrieved)

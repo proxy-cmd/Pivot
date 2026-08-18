@@ -15,7 +15,8 @@ The backend modules are grouped by responsibility rather than by a generic layer
 - `analytics.py`, `pipeline.py`, and `autopilot.py` implement deterministic data
   analysis, transformations, and the Auto Pilot workflow.
 - `assistant.py` owns conversational dataset analysis. `rag.py` owns document
-  extraction and retrieval.
+  extraction and retrieval. `gemini.py` is the sole boundary for Gemini provider
+  calls and model JSON parsing.
 - `dataset_io.py` owns temporary files, object storage transfer, dataframe loading,
   and profile/overview response construction.
 - `dataset_sql.py` owns the in-memory, read-only SQLite adapter and SQL generation.
@@ -25,9 +26,8 @@ The backend modules are grouped by responsibility rather than by a generic layer
   cross-cutting infrastructure concerns.
 
 When adding a data workflow, keep its calculation with the relevant domain module;
-add to `dataset_io.py` only when it is reusable file/storage behavior. New HTTP
-endpoints belong in `main.py` until a cohesive endpoint family is large enough to
-justify a router module.
+add to `dataset_io.py` only when it is reusable file/storage behavior. Keep HTTP
+error translation and request/response handling at the route boundary.
 
 ## Frontend
 

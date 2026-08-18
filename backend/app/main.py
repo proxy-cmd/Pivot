@@ -3,14 +3,12 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
 import re
 import time
 from collections import defaultdict, deque
-from contextlib import asynccontextmanager, contextmanager
+from contextlib import asynccontextmanager
 from uuid import uuid4
 from pathlib import Path
-from tempfile import mkstemp
 from typing import Any
 
 import pandas as pd
@@ -25,6 +23,19 @@ from .analytics import _numeric_series, forecast, prepare_frame, profile_frame, 
 from .autopilot import briefing_markdown, build_report, clean_frame, explore, plan_prompt
 from .config import get_settings
 from .database import get_engine
+from .dataset_analysis import run_analysis as run_dataset_analysis
+from .dataset_io import (
+    available_analyses,
+    overview_payload,
+    profile_payload,
+    read_dataset_source,
+    read_file,
+    save_frame,
+    save_text,
+    temporary_path,
+    validate_upload_name,
+)
+from .dataset_sql import deterministic_query, execute_query, generate_query
 from .auth import authenticate_request, current_user_id
 from .auth_routes import router as auth_router
 from .models import AnalysisRequest, ChatRequest, ReportRequest, ScenarioRequest, SqlAskRequest, SqlRequest, TransformRequest
@@ -152,170 +163,6 @@ def _dataset_or_404(dataset_id: str) -> dict:
     return item
 
 
-def _validate_upload_name(filename: str) -> None:
-    if len(filename) > 255 or Path(filename).name != filename or any(ord(char) < 32 for char in filename):
-        raise HTTPException(400, 'Invalid file name.')
-
-
-def _read_file(source: Path, suffix: str) -> pd.DataFrame:
-    if suffix in ('.xlsx', '.xls'):
-        return pd.read_excel(source)
-    if suffix == '.json':
-        return pd.read_json(source)
-    if suffix == '.parquet':
-        return pd.read_parquet(source)
-    return pd.read_csv(source)
-
-
-@contextmanager
-def _temporary_path(suffix: str):
-    descriptor, name = mkstemp(suffix=suffix)
-    os.close(descriptor)
-    path = Path(name)
-    try:
-        yield path
-    finally:
-        path.unlink(missing_ok=True)
-
-
-def _read_source(item: dict) -> pd.DataFrame:
-    try:
-        with get_storage().local_file(item.get('active_path') or item['source_path']) as path:
-            if not path.exists():
-                raise FileNotFoundError(path)
-            frame = _read_file(path, path.suffix.lower())
-    except Exception as error:
-        raise HTTPException(422, f'Could not read the preserved source: {error}') from error
-    frame = prepare_frame(frame)
-    profile = item.get('profile') or {}
-    for column in profile.get('schema', {}).get('numeric_columns', []):
-        if column in frame.columns:
-            frame[column] = _numeric_series(frame, column)
-    return frame
-
-
-def _save_frame(item: dict, frame: pd.DataFrame, name: str) -> str:
-    key = get_storage().key(item['owner_user_id'], item['id'], name, '.csv')
-    with _temporary_path('.csv') as path:
-        frame.to_csv(path, index=False)
-        get_storage().upload_file(path, key)
-    return key
-
-
-def _save_text(item: dict, text: str, name: str, suffix: str) -> str:
-    key = get_storage().key(item['owner_user_id'], item['id'], name, suffix)
-    with _temporary_path(suffix) as path:
-        path.write_text(text, encoding='utf-8')
-        get_storage().upload_file(path, key)
-    return key
-
-
-def _profile_payload(frame: pd.DataFrame, filename: str, dataset_id: str) -> dict[str, Any]:
-    result = profile_frame(frame, filename)
-    result['dataset_id'] = dataset_id
-    result['preview'] = json.loads(frame.head(8).fillna('').to_json(orient='records', date_format='iso'))
-    result['columns_list'] = [str(column) for column in frame.columns]
-    issue_operations = {
-        'missing_values': ('fill_missing', 'Fill missing values'),
-        'duplicate_records': ('remove_duplicates', 'Remove exact duplicates'),
-        'whitespace': ('trim_text', 'Trim text fields'),
-        'invalid_dates': ('parse_dates', 'Parse detected date fields'),
-        'outliers': ('remove_outliers', 'Review numeric outliers'),
-        'negative_values': ('remove_outliers', 'Review negative and extreme numeric values'),
-    }
-    recommendations = []
-    for issue in result.get('issues', []):
-        operation, label = issue_operations.get(issue['type'], ('normalize_columns', 'Normalize column names'))
-        if not any(item['operation'] == operation for item in recommendations):
-            recommendations.append({'operation': operation, 'label': label, 'reason': issue['fix']})
-    result['recommendations'] = recommendations
-    return result
-
-
-def _overview(frame: pd.DataFrame, profile: dict) -> dict[str, Any]:
-    schema = profile.get('schema', {})
-    numeric = schema.get('numeric_columns', [])
-    dates = schema.get('date_columns', [])
-    cards = [
-        {'label': 'Rows', 'value': profile.get('rows', 0), 'kind': 'count'},
-        {'label': 'Columns', 'value': profile.get('columns', 0), 'kind': 'count'},
-        {'label': 'Quality score', 'value': profile.get('quality_score', 0), 'suffix': '/100', 'kind': 'quality'},
-    ]
-    for column in numeric[:3]:
-        values = _numeric_series(frame, column).dropna()
-        if len(values):
-            cards.append({'label': column.replace('_', ' ').title(), 'value': round(float(values.sum()), 2), 'kind': 'metric', 'column': column})
-    chart: list[dict[str, Any]] = []
-    if dates and numeric:
-        date_column, value_column = dates[0], numeric[0]
-        dates_series = pd.to_datetime(frame[date_column], errors='coerce')
-        values = _numeric_series(frame, value_column)
-        grouped = pd.DataFrame({'period': dates_series.dt.to_period('M').astype('string'), 'value': values}).dropna()
-        if not grouped.empty:
-            chart = [{'period': str(row['period']), 'value': round(float(row['value']), 2)} for _, row in grouped.groupby('period', as_index=False)['value'].sum().tail(24).iterrows()]
-    breakdown = []
-    dimensions = [column for column in frame.columns if column not in numeric and column not in dates]
-    if dimensions:
-        dimension = dimensions[0]
-        counts = frame[dimension].fillna('(blank)').astype(str).value_counts().head(8)
-        breakdown = [{'label': str(label), 'value': int(value)} for label, value in counts.items()]
-    return {'cards': cards, 'trend': chart, 'breakdown': breakdown, 'trend_columns': {'date': dates[0] if dates else None, 'value': numeric[0] if numeric else None}}
-
-
-def _analyses(frame: pd.DataFrame, profile: dict) -> list[dict[str, Any]]:
-    schema = profile.get('schema', {})
-    analyses = []
-    for column in schema.get('numeric_columns', []):
-        analyses.append({'id': f'trend:{column}', 'kind': 'trend', 'title': f'Trend of {column.replace("_", " ")}', 'description': f'Inspect how {column.replace("_", " ")} changes over time.', 'column': column, 'enabled': bool(schema.get('date_columns'))})
-        analyses.append({'id': f'distribution:{column}', 'kind': 'distribution', 'title': f'Distribution of {column.replace("_", " ")}', 'description': f'Summarize the spread, center, and extremes of {column.replace("_", " ")}.', 'column': column, 'enabled': True})
-    dimensions = [column for column in frame.columns if column not in schema.get('numeric_columns', []) and column not in schema.get('date_columns', [])]
-    for column in dimensions[:8]:
-        analyses.append({'id': f'breakdown:{column}', 'kind': 'breakdown', 'title': f'Breakdown by {column.replace("_", " ")}', 'description': f'Compare the most common values in {column.replace("_", " ")}.', 'column': column, 'enabled': True})
-    analyses.append({'id': 'quality', 'kind': 'quality', 'title': 'Data quality review', 'description': 'Review completeness, duplicates, and detected quality risks.', 'enabled': True})
-    return analyses
-
-
-def _quote(value: str) -> str:
-    return '"' + str(value).replace('"', '""') + '"'
-
-
-def _execute_frame(frame: pd.DataFrame, query: str) -> dict[str, Any]:
-    import sqlite3
-    db = sqlite3.connect(':memory:')
-    try:
-        sql_frame = frame.copy()
-        for column in sql_frame.select_dtypes(include=['object', 'string']).columns:
-            if any(word in str(column).lower() for word in ('date', 'time', 'month', 'year')):
-                parsed = pd.to_datetime(sql_frame[column], format='mixed', errors='coerce')
-                if parsed.notna().mean() >= 0.2:
-                    sql_frame[column] = parsed.dt.strftime('%Y-%m-%d')
-        sql_frame.to_sql('dataset', db, index=False, if_exists='replace')
-        result = pd.read_sql_query(query, db)
-        return {'columns': result.columns.tolist(), 'rows': json.loads(result.head(200).fillna('').to_json(orient='records')), 'count': int(len(result))}
-    finally:
-        db.close()
-
-
-def _analysis_summary(kind: str, column: str | None, result: dict[str, Any], profile: dict[str, Any]) -> dict[str, Any]:
-    rows = result.get('rows') or []
-    schema = profile.get('schema', {})
-    metric_name = column or (schema.get('numeric_columns') or ['value'])[0]
-    if kind == 'trend' and rows:
-        values = [float(row.get('value', 0) or 0) for row in rows]
-        peak = rows[values.index(max(values))]
-        low = rows[values.index(min(values))]
-        return {'metric': metric_name, 'aggregation': 'monthly sum', 'periods': len(rows), 'total': round(sum(values), 2), 'average': round(sum(values) / len(values), 2), 'highest_period': {'period': peak.get('period') or peak.get('label'), 'value': round(max(values), 2)}, 'lowest_period': {'period': low.get('period') or low.get('label'), 'value': round(min(values), 2)}}
-    if kind == 'distribution':
-        metrics = result.get('metrics') or {}
-        return {'metric': metric_name, 'aggregation': 'distribution', **metrics}
-    if kind == 'breakdown' and rows:
-        first = rows[0]
-        label_key = 'dimension' if 'dimension' in first else 'label'
-        value_key = 'value'
-        return {'field': metric_name, 'aggregation': 'row count', 'groups': len(rows), 'top_group': {'value': first.get(label_key), 'count': first.get(value_key)}}
-    return {}
-
-
 def _chat_summary(question: str, item: dict, query_result: dict[str, Any], query: str | None) -> str:
     profile = item.get('profile') or {}
     rows = query_result.get('rows') or []
@@ -337,42 +184,6 @@ def _chat_summary(question: str, item: dict, query_result: dict[str, Any], query
     return f"I found {query_result.get('count', len(rows)):,} evidence rows with fields {fields}. The first result is shown below so you can inspect the exact values returned by the query."
 
 
-def _deterministic_sql(question: str, item: dict) -> str | None:
-    profile = item.get('profile') or {}
-    columns = item.get('profile', {}).get('columns_list', [])
-    numeric = profile.get('schema', {}).get('numeric_columns', [])
-    dates = profile.get('schema', {}).get('date_columns', [])
-    dimensions = [column for column in columns if column not in numeric and column not in dates]
-    text = question.lower()
-    metric = next((column for column in numeric if any(word in column.lower() for word in ('revenue', 'sales', 'amount', 'price', 'cost', 'total', 'profit'))), numeric[0] if numeric else None)
-    dimension = next((column for column in dimensions if any(word in column.lower() for word in ('customer', 'product', 'region', 'country', 'category', 'department', 'name'))), dimensions[0] if dimensions else None)
-    if any(word in text for word in ('quality', 'missing', 'duplicate', 'clean')):
-        return 'SELECT * FROM dataset LIMIT 1'
-    if ('trend' in text or 'month' in text or 'time' in text) and dates and metric:
-        return f'SELECT strftime(\'%Y-%m\', {_quote(dates[0])}) AS period, SUM({_quote(metric)}) AS value FROM dataset GROUP BY period ORDER BY period'
-    if any(word in text for word in ('top', 'most', 'highest', 'best')) and metric and dimension:
-        limit = 50 if '50' in text else 20
-        return f'SELECT {_quote(dimension)} AS dimension, SUM({_quote(metric)}) AS value FROM dataset GROUP BY {_quote(dimension)} ORDER BY value DESC LIMIT {limit}'
-    if metric and any(word in text for word in ('average', 'mean', 'sum', 'total', 'how much', 'revenue', 'sales')):
-        aggregate = 'AVG' if any(word in text for word in ('average', 'mean')) else 'SUM'
-        return f'SELECT {aggregate}({_quote(metric)}) AS value FROM dataset'
-    return None
-
-
-def _gemini_sql(question: str, item: dict) -> str | None:
-    if not settings.gemini_api_key:
-        return None
-    schema = item.get('profile', {}).get('schema', {})
-    columns = item.get('profile', {}).get('columns_list', [])
-    prompt = f'''Return only one SQLite SELECT query for the question. The table is dataset. Allowed columns are {columns}. Never use markdown, semicolons, or write operations. Question: {question}'''
-    try:
-        from google import genai
-        text = genai.Client(api_key=settings.gemini_api_key).models.generate_content(model=settings.gemini_model, contents=prompt).text or ''
-        return text.replace('```sql', '').replace('```', '').strip()
-    except Exception:
-        return None
-
-
 @app.get('/health')
 def health():
     try:
@@ -388,14 +199,14 @@ def health():
 async def profile(file: UploadFile = File(...)):
     if not file.filename:
         raise HTTPException(400, 'File name is required.')
-    _validate_upload_name(file.filename)
+    validate_upload_name(file.filename)
     suffix = Path(file.filename).suffix.lower()
     if suffix not in ALLOWED_SUFFIXES:
         raise HTTPException(415, 'Supported files are CSV, Excel, JSON, and Parquet.')
     if file.content_type not in ALLOWED_UPLOAD_TYPES:
         raise HTTPException(415, 'The uploaded content type is not supported.')
     dataset_id = uuid4().hex
-    with _temporary_path(suffix) as path:
+    with temporary_path(suffix) as path:
         size = 0
         with path.open('wb') as handle:
             while chunk := await file.read(64 * 1024):
@@ -404,7 +215,7 @@ async def profile(file: UploadFile = File(...)):
                     raise HTTPException(413, f'Files must be {MAX_UPLOAD_BYTES // 1024 // 1024}MB or smaller.')
                 handle.write(chunk)
         try:
-            frame = prepare_frame(_read_file(path, suffix))
+            frame = prepare_frame(read_file(path, suffix))
         except Exception as error:
             raise HTTPException(422, f'Could not read file: {error}') from error
         if frame.empty:
@@ -415,7 +226,7 @@ async def profile(file: UploadFile = File(...)):
         key = get_storage().key(user_id, dataset_id, 'source', suffix)
         get_storage().upload_file(path, key)
     create_dataset(file.filename, key, dataset_id)
-    result = _profile_payload(frame, file.filename, dataset_id)
+    result = profile_payload(frame, file.filename, dataset_id)
     context = [f'Dataset: {file.filename}', f'Role: {result["role"]}', f'Rows: {result["rows"]}', f'Columns: {", ".join(frame.columns.astype(str).tolist())}', frame.head(25).to_csv(index=False)]
     add_chunks(dataset_id, file.filename, context)
     finish_dataset(dataset_id, result)
@@ -438,13 +249,13 @@ def dataset(dataset_id: str):
 @app.get('/api/datasets/{dataset_id}/overview')
 def overview(dataset_id: str):
     item = _dataset_or_404(dataset_id)
-    return _overview(_read_source(item), item['profile'] or {})
+    return overview_payload(read_dataset_source(item), item['profile'] or {})
 
 
 @app.get('/api/datasets/{dataset_id}/analyses')
 def analyses(dataset_id: str):
     item = _dataset_or_404(dataset_id)
-    return {'analyses': _analyses(_read_source(item), item['profile'] or {})}
+    return {'analyses': available_analyses(read_dataset_source(item), item['profile'] or {})}
 
 
 @app.post('/api/datasets/{dataset_id}/context')
@@ -453,7 +264,7 @@ async def add_dataset_context(dataset_id: str, file: UploadFile = File(...)):
     _dataset_or_404(dataset_id)
     if not file.filename:
         raise HTTPException(400, 'A context file name is required.')
-    _validate_upload_name(file.filename)
+    validate_upload_name(file.filename)
     suffix = Path(file.filename).suffix.lower()
     if suffix not in CONTEXT_SUFFIXES:
         raise HTTPException(415, 'Context files must be PDF, TXT, Markdown, or JSON.')
@@ -477,9 +288,9 @@ async def add_dataset_context(dataset_id: str, file: UploadFile = File(...)):
 def run_autopilot(dataset_id: str):
     """Run the safe, local-first one-click analysis workflow."""
     item = _dataset_or_404(dataset_id)
-    source = _read_source(item)
+    source = read_dataset_source(item)
     cleaned, steps = clean_frame(source)
-    cleaned_profile = _profile_payload(cleaned, item['name'], dataset_id)
+    cleaned_profile = profile_payload(cleaned, item['name'], dataset_id)
     facts = explore(cleaned, cleaned_profile)
     plan = None
     if settings.gemini_api_key:
@@ -487,7 +298,7 @@ def run_autopilot(dataset_id: str):
     report = build_report(cleaned, cleaned_profile, steps, plan, facts)
 
     version_number = len(item['versions'])
-    output = _save_frame(item, cleaned, f'version-{version_number}-autopilot')
+    output = save_frame(item, cleaned, f'version-{version_number}-autopilot')
     detail = {
         'output': output,
         'source_unchanged': True,
@@ -499,7 +310,7 @@ def run_autopilot(dataset_id: str):
     activate_dataset_version(dataset_id, output, cleaned_profile)
 
     briefing = briefing_markdown(item['name'], report, cleaned_profile)
-    briefing_path = _save_text(item, briefing, 'auto-pilot-briefing', '.md')
+    briefing_path = save_text(item, briefing, 'auto-pilot-briefing', '.md')
     report_id = add_report(dataset_id, 'Auto Pilot briefing', 'md', briefing_path)
 
     return {
@@ -538,33 +349,10 @@ def latest_autopilot(dataset_id: str):
 @app.post('/api/datasets/{dataset_id}/analyses/run')
 def run_analysis(dataset_id: str, body: AnalysisRequest):
     item = _dataset_or_404(dataset_id)
-    frame = _read_source(item)
-    profile = item['profile'] or {}
-    if body.kind == 'quality':
-        return {'kind': body.kind, 'title': 'Data quality review', 'profile': profile, 'rows': []}
-    column = body.column
-    if not column or column not in frame.columns:
-        raise HTTPException(422, 'This analysis column is not available in the dataset.')
-    if body.kind == 'distribution':
-        values = _numeric_series(frame, column).dropna()
-        if values.empty:
-            raise HTTPException(422, 'This field does not contain usable numeric values.')
-        histogram = pd.cut(values, bins=min(10, max(2, values.nunique())), duplicates='drop').value_counts().sort_index()
-        chart = [{'label': str(label), 'value': int(value)} for label, value in histogram.items()]
-        metrics = {'count': int(values.size), 'min': round(float(values.min()), 2), 'max': round(float(values.max()), 2), 'mean': round(float(values.mean()), 2), 'median': round(float(values.median()), 2)}
-        return {'kind': body.kind, 'title': f'Distribution of {column}', 'field': column, 'aggregation': 'value frequency', 'metrics': metrics, 'columns': ['range', 'count'], 'chart': chart}
-    if body.kind == 'breakdown':
-        counts = frame[column].fillna('(blank)').astype(str).value_counts().head(25)
-        chart = [{'label': str(label), 'value': int(value)} for label, value in counts.items()]
-        return {'kind': body.kind, 'title': f'Breakdown by {column}', 'field': column, 'aggregation': 'row count', 'metrics': {'groups': len(chart), 'rows_in_top_groups': sum(point['value'] for point in chart)}, 'columns': [column, 'count'], 'chart': chart}
-    dates = profile.get('schema', {}).get('date_columns', [])
-    if not dates:
-        raise HTTPException(422, 'A date field is required for a trend analysis.')
-    grouped = pd.DataFrame({'period': pd.to_datetime(frame[dates[0]], errors='coerce').dt.to_period('M').astype('string'), 'value': _numeric_series(frame, column)}).dropna().groupby('period', as_index=False)['value'].sum()
-    chart = [{'label': str(row['period']), 'value': round(float(row['value']), 2)} for _, row in grouped.iterrows()]
-    result = {'kind': body.kind, 'title': f'Trend of {column}', 'field': column, 'aggregation': 'monthly sum', 'columns': ['period', column], 'chart': chart}
-    result['metrics'] = _analysis_summary(body.kind, column, {'rows': [{'period': point['label'], 'value': point['value']} for point in chart]}, profile)
-    return result
+    try:
+        return run_dataset_analysis(read_dataset_source(item), item['profile'] or {}, body.kind, body.column)
+    except ValueError as error:
+        raise HTTPException(422, str(error)) from error
 
 
 @app.get('/api/datasets/{dataset_id}/events')
@@ -593,13 +381,13 @@ def preview_transformation(dataset_id: str, operation: str):
     item = _dataset_or_404(dataset_id)
     if operation not in {'trim_text', 'remove_duplicates', 'normalize_columns', 'parse_dates', 'fill_missing', 'remove_outliers', 'standardize_format'}:
         raise HTTPException(422, 'Unsupported transformation.')
-    source = _read_source(item)
+    source = read_dataset_source(item)
     try:
         clean, metrics = apply(source.copy(), operation)
     except ValueError as error:
         raise HTTPException(422, str(error)) from error
     metrics = {**metrics, 'rows_before': len(source), 'rows_after': len(clean)}
-    preview_key = _save_frame(item, clean, f'preview-{uuid4().hex}')
+    preview_key = save_frame(item, clean, f'preview-{uuid4().hex}')
     transformation_id = create_transformation(dataset_id, operation, preview_key, metrics)
     before_preview = json.loads(
     source.head(8)
@@ -629,8 +417,8 @@ def approve_transformation(dataset_id: str, transformation_id: str):
             cleaned = pd.read_csv(preview)
     except Exception as error:
         raise HTTPException(404, 'Transformation preview is unavailable.') from error
-    output = _save_frame(item, cleaned, f'version-{version_number}')
-    cleaned_profile = _profile_payload(cleaned, item['name'], dataset_id)
+    output = save_frame(item, cleaned, f'version-{version_number}')
+    cleaned_profile = profile_payload(cleaned, item['name'], dataset_id)
     detail = {'output': output, 'metrics': transformation['metrics'], 'profile': cleaned_profile, 'source_unchanged': True}
     version_id = add_version(dataset_id, f'executed:{transformation["operation"]}', json.dumps(detail))
     activate_dataset_version(dataset_id, output, cleaned_profile)
@@ -647,11 +435,11 @@ def activate_version(dataset_id: str, number: int):
         raise HTTPException(404, 'Version not found.')
     if number == 0:
         path = item['source_path']
-        profile = _profile_payload(_read_source({**item, 'active_path': item['source_path']}), item['name'], dataset_id)
+        profile = profile_payload(read_dataset_source({**item, 'active_path': item['source_path']}), item['name'], dataset_id)
     else:
         detail = json.loads(versions[0]['detail'])
         path = detail['output']
-        profile = detail.get('profile') or _profile_payload(_read_source({**item, 'active_path': path}), item['name'], dataset_id)
+        profile = detail.get('profile') or profile_payload(read_dataset_source({**item, 'active_path': path}), item['name'], dataset_id)
     activate_dataset_version(dataset_id, path, profile)
     return {'ok': True, 'active_version': number, 'profile': profile}
 
@@ -668,8 +456,8 @@ def compare_versions(dataset_id: str, from_version: int = 0, to_version: int = 0
         return json.loads(version['detail'])['output']
     before, after = path_for(from_version), path_for(to_version)
     try:
-        before_frame = _read_source({**item, 'active_path': before})
-        after_frame = _read_source({**item, 'active_path': after})
+        before_frame = read_dataset_source({**item, 'active_path': before})
+        after_frame = read_dataset_source({**item, 'active_path': after})
     except HTTPException:
         raise HTTPException(404, 'One of the requested version outputs is unavailable.')
     return {'from_version': from_version, 'to_version': to_version, 'rows_before': len(before_frame), 'rows_after': len(after_frame), 'columns_before': before_frame.columns.tolist(), 'columns_after': after_frame.columns.tolist(), 'added_columns': [column for column in after_frame.columns if column not in before_frame.columns], 'removed_columns': [column for column in before_frame.columns if column not in after_frame.columns]}
@@ -707,7 +495,7 @@ def execute_sql(body: SqlRequest):
     item = _dataset_or_404(body.dataset_id)
     try:
         query = validate_readonly_sql(body.query)
-        return _execute_frame(_read_source(item), query)
+        return execute_query(read_dataset_source(item), query)
     except ValueError as error:
         raise HTTPException(422, str(error)) from error
     except Exception as error:
@@ -717,12 +505,12 @@ def execute_sql(body: SqlRequest):
 @app.post('/api/sql/generate')
 def generate_sql(body: SqlAskRequest):
     item = _dataset_or_404(body.dataset_id)
-    query = _deterministic_sql(body.question, item) or _gemini_sql(body.question, item)
+    query = deterministic_query(body.question, item) or generate_query(body.question, item, settings.gemini_api_key, settings.gemini_model)
     if not query:
         raise HTTPException(422, 'I could not find enough schema evidence to generate a query.')
     try:
         query = validate_readonly_sql(query)
-        result = _execute_frame(_read_source(item), query)
+        result = execute_query(read_dataset_source(item), query)
     except Exception as error:
         raise HTTPException(422, f'I generated a query that could not be safely executed: {error}') from error
     return result | {'sql': query, 'explanation': 'The query was generated from the detected schema, validated, and executed against the uploaded dataset.'}
@@ -789,13 +577,13 @@ def chat(body: ChatRequest):
     if body.question.strip().lower() in {'hi', 'hello', 'hey', 'hiya', 'good morning', 'good afternoon', 'good evening'}:
         return {'answer': f"Hi — I’m connected to {item['name']}. I found {profile.get('rows', 0)} rows and {profile.get('columns', 0)} detected fields. Ask me about trends, quality, categories, or values and I’ll investigate the source.", 'source': 'dataset-aware', 'sql': None, 'citations': [{'source': item['name'], 'score': 1.0}]}
     retrieved = retrieve(body.question, chunks_for(body.dataset_id))
-    query = _deterministic_sql(body.question, item) or _gemini_sql(body.question, item)
+    query = deterministic_query(body.question, item) or generate_query(body.question, item, settings.gemini_api_key, settings.gemini_model)
     evidence: dict[str, Any] = {'profile': {'rows': profile.get('rows'), 'columns': profile.get('columns_list'), 'quality_score': profile.get('quality_score'), 'issues': profile.get('issues'), 'metrics': profile.get('metrics')}, 'retrieved_context': retrieved}
     if query:
         try:
             query = validate_readonly_sql(query)
             evidence['query'] = query
-            evidence['query_result'] = _execute_frame(_read_source(item), query)
+            evidence['query_result'] = execute_query(read_dataset_source(item), query)
         except Exception:
             query = None
     sources = [{'source': item['name'], 'score': 1.0}]
@@ -1015,7 +803,7 @@ Respond ONLY with a JSON block in this exact format (no markdown except the json
     if intent == 'query' and sql_query:
         try:
             validated_query = validate_readonly_sql(sql_query)
-            query_result = _execute_frame(_read_source(item), validated_query)
+            query_result = execute_query(read_dataset_source(item), validated_query)
             
             explain_prompt = f"""You are Pivot Analyst, an expert senior data analyst.
 User Question: "{question}"
@@ -1081,7 +869,7 @@ Respond ONLY with a JSON block in this exact format:
             # fall through to deterministic/fallback assistant
 
     # 2.3 General Chat or Fallback (for no API key or execution failure)
-    result = answer_question(question, _read_source(item), profile, history=history or [])
+    result = answer_question(question, read_dataset_source(item), profile, history=history or [])
     
     # Handle needs_gemini fallback
     if result.get('intent') == 'needs_gemini' and settings.gemini_api_key:
@@ -1159,7 +947,7 @@ Dataset context:
 def create_report(dataset_id: str, body: ReportRequest):
     item = _dataset_or_404(dataset_id)
     profile = item.get('profile') or {}
-    overview_data = _overview(_read_source(item), profile)
+    overview_data = overview_payload(read_dataset_source(item), profile)
     safe_title = re.sub(r'[^a-zA-Z0-9_-]+', '-', body.title or 'pivot-report').strip('-').lower() or 'pivot-report'
     format_name = body.format.lower()
     if format_name not in {'md', 'csv', 'pdf'}:
@@ -1186,7 +974,7 @@ def create_report(dataset_id: str, body: ReportRequest):
             content, media_type, suffix = f'<html><body><pre>{markdown}</pre></body></html>', 'text/html', 'html'
         else:
             content, media_type, suffix = markdown, 'text/markdown', 'md'
-    path = _save_text(item, content, safe_title, f'.{suffix}')
+    path = save_text(item, content, safe_title, f'.{suffix}')
     report_id = add_report(dataset_id, body.title or 'Pivot report', format_name, path)
     return {'id': report_id, 'title': body.title or 'Pivot report', 'format': format_name, 'download_url': f'/api/datasets/{dataset_id}/reports/{report_id}/download'}
 

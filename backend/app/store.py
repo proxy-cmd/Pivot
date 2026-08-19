@@ -8,7 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
 from .database import get_session_factory
-from .db_models import Chunk, Dataset, DatasetEvent, RefreshSession, Report, Transformation, User, Version
+from .db.models import Chunk, Dataset, DatasetEvent, RefreshSession, Report, Transformation, User, Version
 
 def _session() -> Session:
     return get_session_factory()()

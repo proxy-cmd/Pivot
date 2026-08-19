@@ -10,7 +10,7 @@ from typing import Any
 import jwt
 from fastapi import HTTPException, Request
 
-from .config import get_settings
+from .core.config import get_settings
 from .store import get_user
 
 logger = logging.getLogger(__name__)

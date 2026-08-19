@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 from fastapi import HTTPException
 
-from backend.app.config import Settings
+from backend.app.core.config import Settings
 from backend.app.storage import Storage
 
 
@@ -24,7 +24,7 @@ def test_production_requires_object_storage():
 def test_local_storage_keeps_keys_inside_its_root(tmp_path, monkeypatch):
     monkeypatch.setenv('STORAGE_BACKEND', 'local')
     monkeypatch.setenv('LOCAL_STORAGE_PATH', str(tmp_path))
-    from backend.app.config import get_settings
+    from backend.app.core.config import get_settings
     get_settings.cache_clear()
     source = tmp_path / 'source.csv'
     source.write_text('value\n1\n', encoding='utf-8')

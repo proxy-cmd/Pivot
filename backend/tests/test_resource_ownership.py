@@ -9,9 +9,9 @@ from sqlalchemy.orm import sessionmaker
 
 from backend.app import store
 from backend.app.auth import current_user_id, issue_access_token
-from backend.app.config import get_settings
-from backend.app.config import Settings
-from backend.app.db_models import Base
+from backend.app.core.config import get_settings
+from backend.app.core.config import Settings
+from backend.app.db.models import Base
 
 
 @pytest.fixture

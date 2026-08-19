@@ -7,7 +7,7 @@ from sqlalchemy import create_engine, event
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
-from .config import get_settings
+from .core.config import get_settings
 
 
 def _create_engine(database_url: str) -> Engine:

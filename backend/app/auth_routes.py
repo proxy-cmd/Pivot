@@ -9,7 +9,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import RedirectResponse, Response
 
 from .auth import authenticate_request, issue_access_token, new_refresh_token, require_auth_configuration, require_auth_database, token_digest
-from .config import get_settings
+from .core.config import get_settings
 from .store import consume_refresh_session, create_refresh_session, revoke_refresh_session, upsert_google_user
 
 logger = logging.getLogger(__name__)

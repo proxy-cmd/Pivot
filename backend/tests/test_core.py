@@ -4,7 +4,7 @@ from backend.app.analytics import forecast, prepare_frame, profile_frame, scenar
 from backend.app.autopilot import briefing_markdown, build_report, clean_frame
 from backend.app.assistant import answer_question
 from backend.app.rag import chunks, extract, retrieve
-from backend.app.security import validate_readonly_sql
+from backend.app.core.security import validate_readonly_sql
 from backend.app.pipeline import apply
 
 

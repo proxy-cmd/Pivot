@@ -7,7 +7,7 @@ from pathlib import Path
 from tempfile import mkstemp
 from typing import BinaryIO, Iterator
 
-from .config import get_settings
+from ..core.config import get_settings
 
 
 class Storage:

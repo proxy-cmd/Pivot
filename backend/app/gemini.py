@@ -7,7 +7,7 @@ import logging
 import re
 from typing import Any
 
-from .config import get_settings
+from .core.config import get_settings
 
 logger = logging.getLogger(__name__)
 

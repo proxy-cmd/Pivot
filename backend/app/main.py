@@ -21,7 +21,7 @@ from fastapi.staticfiles import StaticFiles
 from .assistant import answer_question
 from .analytics import _numeric_series, forecast, prepare_frame, profile_frame, scenario
 from .autopilot import briefing_markdown, build_report, clean_frame, explore, plan_prompt
-from .config import get_settings
+from .core.config import get_settings
 from .database import get_engine
 from .dataset_analysis import run_analysis as run_dataset_analysis
 from .gemini import generate as call_gemini, parse_json_object as extract_json
@@ -39,10 +39,11 @@ from .dataset_io import (
 from .dataset_sql import deterministic_query, execute_query, generate_query
 from .auth import authenticate_request, current_user_id
 from .auth_routes import router as auth_router
-from .models import AnalysisRequest, ChatRequest, ReportRequest, ScenarioRequest, SqlAskRequest, SqlRequest, TransformRequest
+from .schemas.requests import AnalysisRequest, ChatRequest, ReportRequest, ScenarioRequest, SqlAskRequest, SqlRequest, TransformRequest
 from .pipeline import apply
 from .rag import extract, retrieve
-from .security import validate_readonly_sql
+from .core.security import validate_readonly_sql
+from .services.transformations import TransformationError, approve as approve_preview, preview as preview_operation, reject as reject_preview
 from .storage import get_storage
 from .store import (
     add_chunks, add_report, add_version, chunks_for, create_dataset, create_transformation,
@@ -379,53 +380,18 @@ def plan_transformation(dataset_id: str, body: TransformRequest):
 
 @app.post('/api/datasets/{dataset_id}/transformations/{operation}/preview')
 def preview_transformation(dataset_id: str, operation: str):
-    item = _dataset_or_404(dataset_id)
-    if operation not in {'trim_text', 'remove_duplicates', 'normalize_columns', 'parse_dates', 'fill_missing', 'remove_outliers', 'standardize_format'}:
-        raise HTTPException(422, 'Unsupported transformation.')
-    source = read_dataset_source(item)
     try:
-        clean, metrics = apply(source.copy(), operation)
-    except ValueError as error:
+        return preview_operation(_dataset_or_404(dataset_id), operation)
+    except TransformationError as error:
         raise HTTPException(422, str(error)) from error
-    metrics = {**metrics, 'rows_before': len(source), 'rows_after': len(clean)}
-    preview_key = save_frame(item, clean, f'preview-{uuid4().hex}')
-    transformation_id = create_transformation(dataset_id, operation, preview_key, metrics)
-    before_preview = json.loads(
-    source.head(8)
-    .astype(object)
-    .where(source.head(8).notna(), None)
-    .to_json(orient="records")
-)
-
-    after_preview = json.loads(
-    clean.head(8)
-    .astype(object)
-    .where(clean.head(8).notna(), None)
-    .to_json(orient="records")
-)
-    return {'id': transformation_id, 'operation': operation, 'metrics': metrics, 'rows_before': len(source), 'rows_after': len(clean), 'before': {'rows': len(source), 'columns': [str(column) for column in source.columns], 'preview': before_preview}, 'after': {'rows': len(clean), 'columns': [str(column) for column in clean.columns], 'preview': after_preview}, 'before_preview': before_preview, 'after_preview': after_preview, 'source_unchanged': True}
 
 
 @app.post('/api/datasets/{dataset_id}/transformations/{transformation_id}/approve')
 def approve_transformation(dataset_id: str, transformation_id: str):
-    item = _dataset_or_404(dataset_id)
-    transformation = get_transformation(transformation_id)
-    if not transformation or transformation['dataset_id'] != dataset_id or transformation['status'] != 'pending':
-        raise HTTPException(404, 'Pending transformation preview not found.')
-    version_number = len(item['versions'])
     try:
-        with get_storage().local_file(transformation['preview_path']) as preview:
-            cleaned = pd.read_csv(preview)
-    except Exception as error:
-        raise HTTPException(404, 'Transformation preview is unavailable.') from error
-    output = save_frame(item, cleaned, f'version-{version_number}')
-    cleaned_profile = profile_payload(cleaned, item['name'], dataset_id)
-    detail = {'output': output, 'metrics': transformation['metrics'], 'profile': cleaned_profile, 'source_unchanged': True}
-    version_id = add_version(dataset_id, f'executed:{transformation["operation"]}', json.dumps(detail))
-    activate_dataset_version(dataset_id, output, cleaned_profile)
-    resolve_transformation(transformation_id, 'approved')
-    get_storage().delete(transformation['preview_path'])
-    return {'ok': True, 'version': version_number, 'version_id': version_id, 'rows_before': transformation['metrics'].get('rows_before'), 'rows_after': transformation['metrics'].get('rows_after'), 'metrics': transformation['metrics'], 'output': str(output), 'profile': cleaned_profile, 'source_unchanged': True}
+        return approve_preview(_dataset_or_404(dataset_id), transformation_id)
+    except TransformationError as error:
+        raise HTTPException(404, str(error)) from error
 
 
 @app.post('/api/datasets/{dataset_id}/versions/{number}/activate')
@@ -466,13 +432,10 @@ def compare_versions(dataset_id: str, from_version: int = 0, to_version: int = 0
 
 @app.post('/api/datasets/{dataset_id}/transformations/{transformation_id}/reject')
 def reject_transformation(dataset_id: str, transformation_id: str):
-    _dataset_or_404(dataset_id)
-    transformation = get_transformation(transformation_id)
-    if not transformation or transformation['dataset_id'] != dataset_id or transformation['status'] != 'pending':
-        raise HTTPException(404, 'Pending transformation preview not found.')
-    get_storage().delete(transformation['preview_path'])
-    resolve_transformation(transformation_id, 'rejected')
-    return {'ok': True, 'message': 'Transformation rejected; the source remains unchanged.'}
+    try:
+        return reject_preview(_dataset_or_404(dataset_id)['id'], transformation_id)
+    except TransformationError as error:
+        raise HTTPException(404, str(error)) from error
 
 
 @app.post('/api/datasets/{dataset_id}/transformations/{operation}/execute')

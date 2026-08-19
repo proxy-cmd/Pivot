@@ -6,21 +6,23 @@ small number of cohesive workflows.
 
 ## Backend
 
-`backend/app/main.py` owns application assembly, middleware, and HTTP route
-handlers. Routes coordinate a workflow and translate expected failures to HTTP
-responses; they do not own file-format or SQL-engine details.
+`backend/app/main.py` owns application assembly, middleware, and the remaining
+dataset, chat, report, and version HTTP handlers. Focused router modules own
+analytics and SQL endpoints. Routes coordinate workflows and translate expected
+failures to HTTP responses; they do not own file-format or SQL-engine details.
 
 The backend modules are grouped by responsibility rather than by a generic layer:
 
-- `analytics.py`, `pipeline.py`, and `autopilot.py` implement deterministic data
-  analysis, transformations, and the Auto Pilot workflow.
+- `analytics.py` profiles frames through explicit schema inference and quality
+  assessment steps. `pipeline.py` contains pure dataframe transformations.
+  `autopilot.py` implements the Auto Pilot workflow.
 - `assistant.py` owns conversational dataset analysis. `rag.py` owns document
   extraction and retrieval. `gemini.py` is the sole boundary for Gemini provider
   calls and model JSON parsing.
 - `dataset_io.py` owns temporary files, object storage transfer, dataframe loading,
-  and profile/overview response construction.
-- `dataset_sql.py` owns the in-memory, read-only SQLite adapter and SQL generation.
-- `store.py`, `database.py`, and `db_models.py` own persistence. They do not depend
+  and profile/overview response construction. `dataset_sql.py` owns the in-memory,
+  read-only SQLite adapter and schema-driven SQL generation.
+- `store.py`, `database.py`, and `db/models.py` own persistence. They do not depend
   on FastAPI route handlers.
 - `auth.py`, `auth_routes.py`, `security.py`, `config.py`, and `storage.py` own
   cross-cutting infrastructure concerns.
@@ -32,10 +34,15 @@ error translation and request/response handling at the route boundary.
 ## Frontend
 
 `src/main.jsx` is the client entrypoint. `auth.jsx` owns session state and
-`api.js` owns the shared authenticated HTTP client, token refresh, and downloads.
-`AppPolished.jsx` currently contains the product's single cohesive workspace UI.
-Splitting it should follow independently reusable feature boundaries, not arbitrary
-component size targets.
+`api.js` owns the shared authenticated HTTP client, token refresh, request errors,
+and downloads. `frontend/constants.js` and `frontend/storage.js` provide small,
+focused browser configuration boundaries. `frontend/components/ui.jsx` contains
+shared visual primitives and the schema explorer.
+
+`AppPolished.jsx` remains the application composition root: it owns workspace
+state, API workflow coordination, and page selection. Feature components should
+move out only when they are independently understandable or reused; the goal is a
+predictable feature boundary, not a maximum number of files.
 
 ## Verification
 

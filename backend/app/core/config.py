@@ -3,6 +3,10 @@ from pathlib import Path
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+PRODUCTION_ENVIRONMENT = 'production'
+POSTGRES_URL_PREFIXES = ('postgresql://', 'postgresql+psycopg://')
+S3_STORAGE_BACKEND = 's3'
+
 
 class Settings(BaseSettings):
     app_env: str = 'development'
@@ -41,39 +45,68 @@ class Settings(BaseSettings):
         return value
 
     def missing_auth_settings(self) -> list[str]:
-        required = {'GOOGLE_CLIENT_ID': self.google_client_id, 'GOOGLE_CLIENT_SECRET': self.google_client_secret, 'JWT_SECRET': self.jwt_secret}
-        return [name for name, value in required.items() if not value]
+        return missing_settings(self.auth_settings())
+
+    def auth_settings(self) -> dict[str, str]:
+        return {
+            'GOOGLE_CLIENT_ID': self.google_client_id,
+            'GOOGLE_CLIENT_SECRET': self.google_client_secret,
+            'JWT_SECRET': self.jwt_secret,
+        }
 
     def validate_auth_security(self) -> None:
         if len(self.jwt_secret.encode('utf-8')) < 32 or self.jwt_secret.startswith('replace-with-'):
             raise ValueError('JWT_SECRET must be at least 32 bytes.')
-        if self.app_env.lower() == 'production':
+        if self.is_production:
             if not self.cookie_secure:
                 raise ValueError('COOKIE_SECURE must be true in production.')
             if not self.frontend_url.startswith('https://') or not self.google_redirect_uri.startswith('https://'):
                 raise ValueError('Production OAuth URLs must use HTTPS.')
 
     def validate_production(self) -> None:
-        if self.app_env.lower() != 'production':
+        if not self.is_production:
             return
-        if not self.database_url.startswith(('postgresql://', 'postgresql+psycopg://')):
-            raise ValueError('DATABASE_URL must be a PostgreSQL URL in production.')
+
+        self.validate_production_database()
         self.validate_auth_security()
-        origins = [item.strip() for item in self.cors_origins.split(',') if item.strip()]
-        if not origins or any(not item.startswith('https://') for item in origins):
+        self.validate_production_origins()
+        self.validate_production_storage()
+
+    @property
+    def is_production(self) -> bool:
+        return self.app_env.lower() == PRODUCTION_ENVIRONMENT
+
+    def validate_production_database(self) -> None:
+        if not self.database_url.startswith(POSTGRES_URL_PREFIXES):
+            raise ValueError('DATABASE_URL must be a PostgreSQL URL in production.')
+
+    def validate_production_origins(self) -> None:
+        origins = self.allowed_origins()
+        if not origins or any(not origin.startswith('https://') for origin in origins):
             raise ValueError('CORS_ORIGINS must contain only HTTPS origins in production.')
+
+    def validate_production_storage(self) -> None:
         if self.storage_backend not in {'local', 's3'}:
             raise ValueError('STORAGE_BACKEND must be local or s3.')
-        if self.storage_backend == 'local':
+        if self.storage_backend != S3_STORAGE_BACKEND:
             raise ValueError('Production requires STORAGE_BACKEND=s3 for persistent storage.')
-        required = {'STORAGE_BUCKET': self.storage_bucket, 'STORAGE_ACCESS_KEY': self.storage_access_key, 'STORAGE_SECRET_KEY': self.storage_secret_key}
-        missing = [name for name, value in required.items() if not value]
+        missing = missing_settings(self.storage_settings())
         if missing:
             raise ValueError(f'Production storage is missing {", ".join(missing)}.')
 
+    def storage_settings(self) -> dict[str, str]:
+        return {
+            'STORAGE_BUCKET': self.storage_bucket,
+            'STORAGE_ACCESS_KEY': self.storage_access_key,
+            'STORAGE_SECRET_KEY': self.storage_secret_key,
+        }
+
+    def allowed_origins(self) -> list[str]:
+        return [origin.strip() for origin in self.cors_origins.split(',') if origin.strip()]
+
     def require_database_url(self) -> str:
         if not self.database_url:
-            if self.app_env.lower() != 'production':
+            if not self.is_production:
                 return f"sqlite:///{Path(__file__).resolve().parents[2] / 'data' / 'pivot.db'}"
             raise RuntimeError('DATABASE_URL must be configured.')
         return self.database_url
@@ -82,3 +115,7 @@ class Settings(BaseSettings):
 @lru_cache
 def get_settings():
     return Settings()
+
+
+def missing_settings(settings: dict[str, str]) -> list[str]:
+    return [name for name, value in settings.items() if not value]

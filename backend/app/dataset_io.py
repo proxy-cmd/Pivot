@@ -19,6 +19,15 @@ from fastapi import HTTPException
 from .analytics import _numeric_series, prepare_frame, profile_frame
 from .storage import get_storage
 
+ISSUE_OPERATIONS = {
+    'missing_values': ('fill_missing', 'Fill missing values'),
+    'duplicate_records': ('remove_duplicates', 'Remove exact duplicates'),
+    'whitespace': ('trim_text', 'Trim text fields'),
+    'invalid_dates': ('parse_dates', 'Parse detected date fields'),
+    'outliers': ('remove_outliers', 'Review numeric outliers'),
+    'negative_values': ('remove_outliers', 'Review negative and extreme numeric values'),
+}
+
 
 def validate_upload_name(filename: str) -> None:
     if len(filename) > 255 or Path(filename).name != filename or any(ord(char) < 32 for char in filename):
@@ -79,54 +88,82 @@ def save_text(item: dict[str, Any], text: str, name: str, suffix: str) -> str:
 
 
 def profile_payload(frame: pd.DataFrame, filename: str, dataset_id: str) -> dict[str, Any]:
-    result = profile_frame(frame, filename)
-    result['dataset_id'] = dataset_id
-    result['preview'] = json.loads(frame.head(8).fillna('').to_json(orient='records', date_format='iso'))
-    result['columns_list'] = [str(column) for column in frame.columns]
-    issue_operations = {
-        'missing_values': ('fill_missing', 'Fill missing values'),
-        'duplicate_records': ('remove_duplicates', 'Remove exact duplicates'),
-        'whitespace': ('trim_text', 'Trim text fields'),
-        'invalid_dates': ('parse_dates', 'Parse detected date fields'),
-        'outliers': ('remove_outliers', 'Review numeric outliers'),
-        'negative_values': ('remove_outliers', 'Review negative and extreme numeric values'),
-    }
+    profile = profile_frame(frame, filename)
+    profile['dataset_id'] = dataset_id
+    profile['preview'] = frame_preview(frame)
+    profile['columns_list'] = [str(column) for column in frame.columns]
+    profile['recommendations'] = transformation_recommendations(profile['issues'])
+    return profile
+
+
+def frame_preview(frame: pd.DataFrame) -> list[dict[str, Any]]:
+    return json.loads(frame.head(8).fillna('').to_json(orient='records', date_format='iso'))
+
+
+def transformation_recommendations(issues: list[dict[str, Any]]) -> list[dict[str, str]]:
     recommendations = []
-    for issue in result.get('issues', []):
-        operation, label = issue_operations.get(issue['type'], ('normalize_columns', 'Normalize column names'))
-        if not any(item['operation'] == operation for item in recommendations):
-            recommendations.append({'operation': operation, 'label': label, 'reason': issue['fix']})
-    result['recommendations'] = recommendations
-    return result
+    for issue in issues:
+        recommendation = issue_recommendation(issue)
+        already_recommended = any(item['operation'] == recommendation['operation'] for item in recommendations)
+        if not already_recommended:
+            recommendations.append(recommendation)
+    return recommendations
+
+
+def issue_recommendation(issue: dict[str, Any]) -> dict[str, str]:
+    operation, label = ISSUE_OPERATIONS.get(issue['type'], ('normalize_columns', 'Normalize column names'))
+    return {'operation': operation, 'label': label, 'reason': issue['fix']}
 
 
 def overview_payload(frame: pd.DataFrame, profile: dict[str, Any]) -> dict[str, Any]:
     schema = profile.get('schema', {})
-    numeric = schema.get('numeric_columns', [])
-    dates = schema.get('date_columns', [])
+    numeric_columns = schema.get('numeric_columns', [])
+    date_columns = schema.get('date_columns', [])
+
+    return {
+        'cards': overview_cards(frame, profile, numeric_columns),
+        'trend': overview_trend(frame, date_columns, numeric_columns),
+        'breakdown': overview_breakdown(frame, numeric_columns, date_columns),
+        'trend_columns': {
+            'date': date_columns[0] if date_columns else None,
+            'value': numeric_columns[0] if numeric_columns else None,
+        },
+    }
+
+
+def overview_cards(frame: pd.DataFrame, profile: dict[str, Any], numeric_columns: list[str]) -> list[dict[str, Any]]:
     cards = [
         {'label': 'Rows', 'value': profile.get('rows', 0), 'kind': 'count'},
         {'label': 'Columns', 'value': profile.get('columns', 0), 'kind': 'count'},
         {'label': 'Quality score', 'value': profile.get('quality_score', 0), 'suffix': '/100', 'kind': 'quality'},
     ]
-    for column in numeric[:3]:
+    for column in numeric_columns[:3]:
         values = _numeric_series(frame, column).dropna()
-        if len(values):
+        if not values.empty:
             cards.append({'label': column.replace('_', ' ').title(), 'value': round(float(values.sum()), 2), 'kind': 'metric', 'column': column})
-    chart: list[dict[str, Any]] = []
-    if dates and numeric:
-        date_column, value_column = dates[0], numeric[0]
-        dates_series = pd.to_datetime(frame[date_column], errors='coerce')
-        values = _numeric_series(frame, value_column)
-        grouped = pd.DataFrame({'period': dates_series.dt.to_period('M').astype('string'), 'value': values}).dropna()
-        if not grouped.empty:
-            chart = [{'period': str(row['period']), 'value': round(float(row['value']), 2)} for _, row in grouped.groupby('period', as_index=False)['value'].sum().tail(24).iterrows()]
-    breakdown = []
-    dimensions = [column for column in frame.columns if column not in numeric and column not in dates]
-    if dimensions:
-        counts = frame[dimensions[0]].fillna('(blank)').astype(str).value_counts().head(8)
-        breakdown = [{'label': str(label), 'value': int(value)} for label, value in counts.items()]
-    return {'cards': cards, 'trend': chart, 'breakdown': breakdown, 'trend_columns': {'date': dates[0] if dates else None, 'value': numeric[0] if numeric else None}}
+    return cards
+
+
+def overview_trend(frame: pd.DataFrame, date_columns: list[str], numeric_columns: list[str]) -> list[dict[str, Any]]:
+    if not date_columns or not numeric_columns:
+        return []
+    date_column = date_columns[0]
+    metric_column = numeric_columns[0]
+    periods = pd.to_datetime(frame[date_column], errors='coerce').dt.to_period('M').astype('string')
+    values = _numeric_series(frame, metric_column)
+    trend_data = pd.DataFrame({'period': periods, 'value': values}).dropna()
+    if trend_data.empty:
+        return []
+    grouped = trend_data.groupby('period', as_index=False)['value'].sum().tail(24)
+    return [{'period': str(row['period']), 'value': round(float(row['value']), 2)} for _, row in grouped.iterrows()]
+
+
+def overview_breakdown(frame: pd.DataFrame, numeric_columns: list[str], date_columns: list[str]) -> list[dict[str, Any]]:
+    dimensions = [column for column in frame.columns if column not in numeric_columns and column not in date_columns]
+    if not dimensions:
+        return []
+    counts = frame[dimensions[0]].fillna('(blank)').astype(str).value_counts().head(8)
+    return [{'label': str(label), 'value': int(value)} for label, value in counts.items()]
 
 
 def available_analyses(frame: pd.DataFrame, profile: dict[str, Any]) -> list[dict[str, Any]]:

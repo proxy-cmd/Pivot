@@ -22,6 +22,7 @@ def require_auth_configuration() -> None:
     missing = settings.missing_auth_settings()
     if missing:
         raise HTTPException(503, f'Authentication is unavailable: missing {", ".join(missing)}.')
+
     try:
         settings.validate_auth_security()
     except ValueError as error:
@@ -39,14 +40,35 @@ def issue_access_token(user_id: str) -> str:
     settings = get_settings()
     require_auth_configuration()
     now = datetime.now(UTC)
-    return jwt.encode({'sub': user_id, 'iss': settings.jwt_issuer, 'aud': settings.jwt_audience, 'iat': now, 'nbf': now, 'exp': now + timedelta(minutes=settings.access_token_minutes), 'jti': secrets.token_urlsafe(16), 'type': 'access'}, settings.jwt_secret, algorithm='HS256')
+    claims = access_token_claims(user_id, settings, now)
+    return jwt.encode(claims, settings.jwt_secret, algorithm='HS256')
+
+
+def access_token_claims(user_id: str, settings, issued_at: datetime) -> dict[str, Any]:
+    return {
+        'sub': user_id,
+        'iss': settings.jwt_issuer,
+        'aud': settings.jwt_audience,
+        'iat': issued_at,
+        'nbf': issued_at,
+        'exp': issued_at + timedelta(minutes=settings.access_token_minutes),
+        'jti': secrets.token_urlsafe(16),
+        'type': 'access',
+    }
 
 
 def decode_access_token(token: str) -> dict[str, Any]:
     settings = get_settings()
     require_auth_configuration()
     try:
-        payload = jwt.decode(token, settings.jwt_secret, algorithms=['HS256'], audience=settings.jwt_audience, issuer=settings.jwt_issuer, options={'require': ['sub', 'exp', 'iat', 'nbf', 'jti']})
+        payload = jwt.decode(
+            token,
+            settings.jwt_secret,
+            algorithms=['HS256'],
+            audience=settings.jwt_audience,
+            issuer=settings.jwt_issuer,
+            options={'require': ['sub', 'exp', 'iat', 'nbf', 'jti']},
+        )
     except jwt.PyJWTError as error:
         raise HTTPException(401, 'Invalid or expired access token.', headers={'WWW-Authenticate': 'Bearer'}) from error
     if payload.get('type') != 'access':
@@ -63,14 +85,20 @@ def new_refresh_token() -> str:
 
 
 def authenticate_request(request: Request) -> dict[str, Any]:
-    authorization = request.headers.get('Authorization', '')
-    scheme, _, token = authorization.partition(' ')
-    if scheme.lower() != 'bearer':
-        token = request.cookies.get('pivot_access', '')
+    token = access_token_from_request(request)
     if not token:
         raise HTTPException(401, 'Authentication required.', headers={'WWW-Authenticate': 'Bearer'})
+
     payload = decode_access_token(token)
     user = get_user(payload['sub'])
     if not user:
         raise HTTPException(401, 'User session is no longer valid.', headers={'WWW-Authenticate': 'Bearer'})
     return user
+
+
+def access_token_from_request(request: Request) -> str:
+    authorization = request.headers.get('Authorization', '')
+    scheme, _, token = authorization.partition(' ')
+    if scheme.lower() == 'bearer':
+        return token
+    return request.cookies.get('pivot_access', '')

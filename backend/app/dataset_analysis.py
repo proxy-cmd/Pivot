@@ -12,21 +12,36 @@ from .analytics import _numeric_series
 def run_analysis(frame: pd.DataFrame, profile: dict[str, Any], kind: str, column: str | None) -> dict[str, Any]:
     """Run one supported analysis and return its stable API-shaped result."""
     if kind == 'quality':
-        return {'kind': kind, 'title': 'Data quality review', 'profile': profile, 'rows': []}
+        return quality_review(profile)
+
     if not column or column not in frame.columns:
         raise ValueError('This analysis column is not available in the dataset.')
+
     if kind == 'distribution':
         return distribution(frame, column)
+
     if kind == 'breakdown':
         return breakdown(frame, column)
+
     return trend(frame, profile, column, kind)
+
+
+def quality_review(profile: dict[str, Any]) -> dict[str, Any]:
+    return {
+        'kind': 'quality',
+        'title': 'Data quality review',
+        'profile': profile,
+        'rows': [],
+    }
 
 
 def distribution(frame: pd.DataFrame, column: str) -> dict[str, Any]:
     values = _numeric_series(frame, column).dropna()
     if values.empty:
         raise ValueError('This field does not contain usable numeric values.')
-    histogram = pd.cut(values, bins=min(10, max(2, values.nunique())), duplicates='drop').value_counts().sort_index()
+
+    bin_count = min(10, max(2, values.nunique()))
+    histogram = pd.cut(values, bins=bin_count, duplicates='drop').value_counts().sort_index()
     chart = [{'label': str(label), 'value': int(value)} for label, value in histogram.items()]
     metrics = {
         'count': int(values.size),
@@ -35,7 +50,15 @@ def distribution(frame: pd.DataFrame, column: str) -> dict[str, Any]:
         'mean': round(float(values.mean()), 2),
         'median': round(float(values.median()), 2),
     }
-    return {'kind': 'distribution', 'title': f'Distribution of {column}', 'field': column, 'aggregation': 'value frequency', 'metrics': metrics, 'columns': ['range', 'count'], 'chart': chart}
+    return {
+        'kind': 'distribution',
+        'title': f'Distribution of {column}',
+        'field': column,
+        'aggregation': 'value frequency',
+        'metrics': metrics,
+        'columns': ['range', 'count'],
+        'chart': chart,
+    }
 
 
 def breakdown(frame: pd.DataFrame, column: str) -> dict[str, Any]:
@@ -56,16 +79,25 @@ def trend(frame: pd.DataFrame, profile: dict[str, Any], column: str, kind: str) 
     dates = profile.get('schema', {}).get('date_columns', [])
     if not dates:
         raise ValueError('A date field is required for a trend analysis.')
-    grouped = (
-        pd.DataFrame({'period': pd.to_datetime(frame[dates[0]], errors='coerce').dt.to_period('M').astype('string'), 'value': _numeric_series(frame, column)})
-        .dropna()
-        .groupby('period', as_index=False)['value']
-        .sum()
-    )
+
+    date_column = dates[0]
+    periods = pd.to_datetime(frame[date_column], errors='coerce').dt.to_period('M').astype('string')
+    values = _numeric_series(frame, column)
+    trend_data = pd.DataFrame({'period': periods, 'value': values}).dropna()
+    grouped = trend_data.groupby('period', as_index=False)['value'].sum()
+
     chart = [{'label': str(row['period']), 'value': round(float(row['value']), 2)} for _, row in grouped.iterrows()]
-    values = [point['value'] for point in chart]
-    metrics = trend_metrics(chart, column) if values else {}
-    return {'kind': kind, 'title': f'Trend of {column}', 'field': column, 'aggregation': 'monthly sum', 'columns': ['period', column], 'chart': chart, 'metrics': metrics}
+    metrics = trend_metrics(chart, column) if chart else {}
+
+    return {
+        'kind': kind,
+        'title': f'Trend of {column}',
+        'field': column,
+        'aggregation': 'monthly sum',
+        'columns': ['period', column],
+        'chart': chart,
+        'metrics': metrics,
+    }
 
 
 def trend_metrics(chart: list[dict[str, Any]], column: str) -> dict[str, Any]:

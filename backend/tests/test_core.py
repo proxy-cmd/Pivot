@@ -5,6 +5,7 @@ from backend.app.autopilot import briefing_markdown, build_report, clean_frame
 from backend.app.assistant import answer_question
 from backend.app.rag import chunks, extract, retrieve
 from backend.app.core.security import validate_readonly_sql
+from backend.app.dataset_sql import deterministic_query
 from backend.app.pipeline import apply
 
 
@@ -30,6 +31,25 @@ def test_rag_extracts_business_glossary_text():
 def test_sql_blocks_writes():
     assert validate_readonly_sql('SELECT * FROM sales') == 'SELECT * FROM sales'
     with pytest.raises(ValueError): validate_readonly_sql('DELETE FROM sales')
+
+
+def test_deterministic_sql_uses_the_dataset_schema():
+    dataset = {
+        'profile': {
+            'columns_list': ['order_date', 'region', 'sales'],
+            'schema': {
+                'numeric_columns': ['sales'],
+                'date_columns': ['order_date'],
+            },
+        },
+    }
+
+    query = deterministic_query('Show sales trend by month', dataset)
+
+    assert query
+    assert 'strftime' in query
+    assert '"order_date"' in query
+    assert '"sales"' in query
 
 
 def test_assistant_returns_visual_breakdown_for_natural_language():
@@ -81,6 +101,15 @@ def test_standardize_format_normalizes_dates_text_and_numbers():
     assert cleaned.loc[0, 'product'] == 'A'
     assert cleaned.loc[0, 'sales'] == 1200
     assert metrics['invalid_dates_normalized'] == 1
+
+
+def test_transformations_do_not_mutate_the_source_frame():
+    source = pd.DataFrame({'product': [' A ', 'B '], 'sales': [100, 200]})
+
+    cleaned, _ = apply(source, 'trim_text')
+
+    assert source['product'].tolist() == [' A ', 'B ']
+    assert cleaned['product'].tolist() == ['A', 'B']
 
 
 def test_autopilot_creates_a_safe_retail_briefing_without_mutating_source():

@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import re
 import time
 from collections import defaultdict, deque
 from contextlib import asynccontextmanager
@@ -19,39 +18,42 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from .assistant import answer_question
-from .analytics import _numeric_series, forecast, prepare_frame, profile_frame, scenario
+from .analytics import prepare_frame
 from .autopilot import briefing_markdown, build_report, clean_frame, explore, plan_prompt
 from .core.config import get_settings
 from .database import get_engine
-from .dataset_analysis import run_analysis as run_dataset_analysis
 from .gemini import generate as call_gemini, parse_json_object as extract_json
 from .dataset_io import (
     available_analyses,
-    overview_payload,
     profile_payload,
     read_dataset_source,
     read_file,
     save_frame,
-    save_text,
     temporary_path,
     validate_upload_name,
 )
 from .dataset_sql import deterministic_query, execute_query, generate_query
 from .auth import authenticate_request, current_user_id
 from .auth_routes import router as auth_router
-from .schemas.requests import AnalysisRequest, ChatRequest, ReportRequest, ScenarioRequest, SqlAskRequest, SqlRequest, TransformRequest
-from .pipeline import apply
+from .api.deps import dataset_or_404
+from .api.routes.analytics import router as analytics_router
+from .api.routes.sql import router as sql_router
+from .schemas.requests import ChatRequest, ReportRequest, TransformRequest
 from .rag import extract, retrieve
 from .core.security import validate_readonly_sql
 from .services.transformations import TransformationError, approve as approve_preview, preview as preview_operation, reject as reject_preview
+from .services.reports import create as create_dataset_report
 from .storage import get_storage
 from .store import (
-    add_chunks, add_report, add_version, chunks_for, create_dataset, create_transformation,
-    event as record_event, events_for, finish_dataset, get_dataset, get_transformation, reports_for, resolve_transformation, activate_dataset_version,
+    add_chunks, add_report, add_version, chunks_for, create_dataset,
+    event as record_event, events_for, finish_dataset, reports_for, activate_dataset_version,
 )
 
 settings = get_settings()
 logger = logging.getLogger(__name__)
+
+# Keep the local name while routes are incrementally moved into ``api/routes``.
+_dataset_or_404 = dataset_or_404
 
 
 @asynccontextmanager
@@ -68,39 +70,53 @@ cors_origins = sorted({origin.strip() for origin in settings.cors_origins.split(
 app.add_middleware(SessionMiddleware, secret_key=settings.jwt_secret or 'development-only-oauth-state-secret', https_only=settings.cookie_secure, same_site='lax')
 app.add_middleware(CORSMiddleware, allow_origins=cors_origins, allow_credentials=True, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Authorization'])
 app.include_router(auth_router)
+app.include_router(analytics_router)
+app.include_router(sql_router)
 
 _requests: dict[str, deque[float]] = defaultdict(deque)
+RATE_LIMITS = {
+    '/api/auth/google/login': (10, 60),
+    '/api/auth/refresh': (30, 60),
+    '/api/chat': (40, 60),
+    '/api/datasets': (12, 300),
+}
+PUBLIC_PATHS = {'/health', '/docs', '/openapi.json', '/redoc'}
+MUTATING_METHODS = {'POST', 'PUT', 'PATCH', 'DELETE'}
 
 
 def _is_rate_limited(request: Request) -> bool:
-    limits = {
-        '/api/auth/google/login': (10, 60),
-        '/api/auth/refresh': (30, 60),
-        '/api/chat': (40, 60),
-        '/api/datasets': (12, 300),
-    }
-    rule = limits.get(request.url.path)
+    rule = RATE_LIMITS.get(request.url.path)
     if not rule:
         return False
+
     limit, window = rule
-    client = request.client.host if request.client else 'unknown'
-    key = f'{request.url.path}:{client}'
+    key = rate_limit_key(request)
     now = time.monotonic()
     entries = _requests[key]
-    while entries and entries[0] <= now - window:
-        entries.popleft()
+
+    remove_expired_requests(entries, now, window)
     if len(entries) >= limit:
         return True
+
     entries.append(now)
     return False
+
+
+def rate_limit_key(request: Request) -> str:
+    client_host = request.client.host if request.client else 'unknown'
+    return f'{request.url.path}:{client_host}'
+
+
+def remove_expired_requests(entries: deque[float], now: float, window: int) -> None:
+    while entries and entries[0] <= now - window:
+        entries.popleft()
 
 
 def _trusted_origin(request: Request) -> bool:
     origin = request.headers.get('origin')
     if not origin:
         return True
-    allowed = {value.strip().rstrip('/') for value in cors_origins}
-    return origin.rstrip('/') in allowed
+    return origin.rstrip('/') in {value.rstrip('/') for value in cors_origins}
 
 
 @app.middleware('http')
@@ -108,12 +124,16 @@ async def authentication_middleware(request: Request, call_next):
     path = request.url.path
     if _is_rate_limited(request):
         return JSONResponse({'detail': 'Too many requests. Please try again shortly.'}, status_code=429, headers={'Retry-After': '60'})
-    if request.method == 'OPTIONS' or path in {'/health', '/docs', '/openapi.json', '/redoc'} or path.startswith('/api/auth/'):
+
+    if request_is_public(request):
         return await call_next(request)
+
     if not path.startswith('/api/'):
         return await call_next(request)
-    if request.method in {'POST', 'PUT', 'PATCH', 'DELETE'} and request.cookies.get('pivot_access') and not _trusted_origin(request):
+
+    if request_requires_origin_check(request) and not _trusted_origin(request):
         return JSONResponse({'detail': 'Request origin is not allowed.'}, status_code=403)
+
     try:
         user = authenticate_request(request)
     except HTTPException as error:
@@ -124,6 +144,16 @@ async def authentication_middleware(request: Request, call_next):
         return await call_next(request)
     finally:
         current_user_id.reset(token)
+
+
+def request_is_public(request: Request) -> bool:
+    return request.method == 'OPTIONS' or request.url.path in PUBLIC_PATHS or request.url.path.startswith('/api/auth/')
+
+
+def request_requires_origin_check(request: Request) -> bool:
+    is_mutating_request = request.method in MUTATING_METHODS
+    uses_access_cookie = bool(request.cookies.get('pivot_access'))
+    return is_mutating_request and uses_access_cookie
 
 
 @app.middleware('http')
@@ -144,7 +174,6 @@ async def security_headers(request: Request, call_next):
         response.headers['Strict-Transport-Security'] = 'max-age=31536000; includeSubDomains'
     return response
 
-MAX_UPLOAD_BYTES = 50 * 1024 * 1024
 MAX_CONTEXT_BYTES = 5 * 1024 * 1024
 ALLOWED_SUFFIXES = {'.csv', '.xlsx', '.xls', '.json', '.parquet'}
 CONTEXT_SUFFIXES = {'.pdf', '.txt', '.md', '.json'}
@@ -156,34 +185,6 @@ ALLOWED_UPLOAD_TYPES = {
 ALLOWED_CONTEXT_TYPES = {'application/octet-stream', 'application/pdf', 'text/plain', 'text/markdown', 'application/json'}
 MAX_UPLOAD_BYTES = settings.upload_max_bytes
 MAX_UPLOAD_ROWS = settings.upload_max_rows
-
-
-def _dataset_or_404(dataset_id: str) -> dict:
-    item = get_dataset(dataset_id)
-    if not item:
-        raise HTTPException(404, 'Dataset session not found.')
-    return item
-
-
-def _chat_summary(question: str, item: dict, query_result: dict[str, Any], query: str | None) -> str:
-    profile = item.get('profile') or {}
-    rows = query_result.get('rows') or []
-    lower = question.lower()
-    if any(word in lower for word in ('who are you', 'what are you', 'your name', 'what can you do')):
-        return f"I’m Pivot Analyst, your evidence-backed data analyst. I’m connected to {item['name']} with {profile.get('rows', 0):,} rows and {profile.get('columns', 0)} detected fields. I can investigate trends, highest values, quality issues, and group comparisons by running read-only evidence queries."
-    if not rows:
-        return f"I’m connected to {item['name']}, but I couldn’t find enough evidence for that question in the current source. Try naming a field such as {', '.join((profile.get('columns_list') or [])[:4])}."
-    first = rows[0]
-    if any(word in lower for word in ('highest', 'top', 'most', 'best')) and 'dimension' in first:
-        return f"The highest grouped value is {first.get('dimension')} at {float(first.get('value', 0)):,.2f} for the selected metric. I grouped by the detected field and ordered the evidence descending."
-    if ('trend' in lower or 'month' in lower or 'time' in lower) and 'period' in first:
-        values = [float(row.get('value', 0) or 0) for row in rows]
-        peak = rows[values.index(max(values))]
-        return f"The {query_result.get('count', len(rows))}-period trend totals {sum(values):,.2f}, averaging {sum(values) / len(values):,.2f} per period. The highest period is {peak.get('period')} at {max(values):,.2f}."
-    if 'value' in first and len(first) == 1:
-        return f"The evidence result is {float(first['value']):,.2f}. This was calculated directly from the detected numeric field using a read-only query."
-    fields = ', '.join(query_result.get('columns') or first.keys())
-    return f"I found {query_result.get('count', len(rows)):,} evidence rows with fields {fields}. The first result is shown below so you can inspect the exact values returned by the query."
 
 
 @app.get('/health')
@@ -198,46 +199,84 @@ def health():
 
 
 @app.post('/api/datasets')
-async def profile(file: UploadFile = File(...)):
+async def upload_dataset(file: UploadFile = File(...)):
+    filename, suffix = upload_details(file)
+    dataset_id = uuid4().hex
+    frame, source_key = await store_upload(file, filename, suffix, dataset_id)
+    profile = profile_payload(frame, filename, dataset_id)
+
+    create_dataset(filename, source_key, dataset_id)
+    add_chunks(dataset_id, filename, dataset_context(filename, frame, profile))
+    finish_dataset(dataset_id, profile)
+
+    return profile
+
+
+@app.post('/api/profile')
+async def legacy_profile(file: UploadFile = File(...)):
+    return await upload_dataset(file)
+
+
+def upload_details(file: UploadFile) -> tuple[str, str]:
     if not file.filename:
         raise HTTPException(400, 'File name is required.')
+
     validate_upload_name(file.filename)
     suffix = Path(file.filename).suffix.lower()
     if suffix not in ALLOWED_SUFFIXES:
         raise HTTPException(415, 'Supported files are CSV, Excel, JSON, and Parquet.')
     if file.content_type not in ALLOWED_UPLOAD_TYPES:
         raise HTTPException(415, 'The uploaded content type is not supported.')
-    dataset_id = uuid4().hex
+
+    return file.filename, suffix
+
+
+async def store_upload(file: UploadFile, filename: str, suffix: str, dataset_id: str) -> tuple[pd.DataFrame, str]:
     with temporary_path(suffix) as path:
-        size = 0
-        with path.open('wb') as handle:
-            while chunk := await file.read(64 * 1024):
-                size += len(chunk)
-                if size > MAX_UPLOAD_BYTES:
-                    raise HTTPException(413, f'Files must be {MAX_UPLOAD_BYTES // 1024 // 1024}MB or smaller.')
-                handle.write(chunk)
-        try:
-            frame = prepare_frame(read_file(path, suffix))
-        except Exception as error:
-            raise HTTPException(422, f'Could not read file: {error}') from error
-        if frame.empty:
-            raise HTTPException(422, 'The uploaded file contains no records.')
-        if len(frame) > MAX_UPLOAD_ROWS:
-            raise HTTPException(413, f'Datasets must contain {MAX_UPLOAD_ROWS:,} rows or fewer.')
-        user_id = current_user_id.get()
-        key = get_storage().key(user_id, dataset_id, 'source', suffix)
-        get_storage().upload_file(path, key)
-    create_dataset(file.filename, key, dataset_id)
-    result = profile_payload(frame, file.filename, dataset_id)
-    context = [f'Dataset: {file.filename}', f'Role: {result["role"]}', f'Rows: {result["rows"]}', f'Columns: {", ".join(frame.columns.astype(str).tolist())}', frame.head(25).to_csv(index=False)]
-    add_chunks(dataset_id, file.filename, context)
-    finish_dataset(dataset_id, result)
-    return result
+        await write_upload(file, path)
+        frame = load_uploaded_frame(path, suffix)
+        validate_uploaded_frame(frame)
+
+        owner_id = current_user_id.get()
+        source_key = get_storage().key(owner_id, dataset_id, 'source', suffix)
+        get_storage().upload_file(path, source_key)
+
+    return frame, source_key
 
 
-@app.post('/api/profile')
-async def legacy_profile(file: UploadFile = File(...)):
-    return await profile(file)
+async def write_upload(file: UploadFile, path: Path) -> None:
+    size = 0
+    with path.open('wb') as handle:
+        while chunk := await file.read(64 * 1024):
+            size += len(chunk)
+            if size > MAX_UPLOAD_BYTES:
+                maximum_megabytes = MAX_UPLOAD_BYTES // 1024 // 1024
+                raise HTTPException(413, f'Files must be {maximum_megabytes}MB or smaller.')
+            handle.write(chunk)
+
+
+def load_uploaded_frame(path: Path, suffix: str) -> pd.DataFrame:
+    try:
+        return prepare_frame(read_file(path, suffix))
+    except Exception as error:
+        raise HTTPException(422, f'Could not read file: {error}') from error
+
+
+def validate_uploaded_frame(frame: pd.DataFrame) -> None:
+    if frame.empty:
+        raise HTTPException(422, 'The uploaded file contains no records.')
+    if len(frame) > MAX_UPLOAD_ROWS:
+        raise HTTPException(413, f'Datasets must contain {MAX_UPLOAD_ROWS:,} rows or fewer.')
+
+
+def dataset_context(filename: str, frame: pd.DataFrame, profile: dict[str, Any]) -> list[str]:
+    return [
+        f'Dataset: {filename}',
+        f'Role: {profile["role"]}',
+        f'Rows: {profile["rows"]}',
+        f'Columns: {", ".join(frame.columns.astype(str).tolist())}',
+        frame.head(25).to_csv(index=False),
+    ]
 
 
 @app.get('/api/datasets/{dataset_id}')
@@ -256,7 +295,7 @@ def overview(dataset_id: str):
 
 @app.get('/api/datasets/{dataset_id}/analyses')
 def analyses(dataset_id: str):
-    item = _dataset_or_404(dataset_id)
+    item = dataset_or_404(dataset_id)
     return {'analyses': available_analyses(read_dataset_source(item), item['profile'] or {})}
 
 
@@ -348,15 +387,6 @@ def latest_autopilot(dataset_id: str):
     return {'report': None}
 
 
-@app.post('/api/datasets/{dataset_id}/analyses/run')
-def run_analysis(dataset_id: str, body: AnalysisRequest):
-    item = _dataset_or_404(dataset_id)
-    try:
-        return run_dataset_analysis(read_dataset_source(item), item['profile'] or {}, body.kind, body.column)
-    except ValueError as error:
-        raise HTTPException(422, str(error)) from error
-
-
 @app.get('/api/datasets/{dataset_id}/events')
 async def stream_events(dataset_id: str):
     _dataset_or_404(dataset_id)
@@ -444,42 +474,6 @@ def execute_transformation_compat(dataset_id: str, operation: str):
     return approve_transformation(dataset_id, preview['id'])
 
 
-@app.post('/api/sql/validate')
-def validate_sql(body: SqlRequest):
-    _dataset_or_404(body.dataset_id)
-    try:
-        query = validate_readonly_sql(body.query)
-    except ValueError as error:
-        raise HTTPException(422, str(error)) from error
-    return {'safe': True, 'query': query, 'explanation': 'Read-only query accepted for the active dataset.'}
-
-
-@app.post('/api/sql/execute')
-def execute_sql(body: SqlRequest):
-    item = _dataset_or_404(body.dataset_id)
-    try:
-        query = validate_readonly_sql(body.query)
-        return execute_query(read_dataset_source(item), query)
-    except ValueError as error:
-        raise HTTPException(422, str(error)) from error
-    except Exception as error:
-        raise HTTPException(422, f'Could not run this query: {error}') from error
-
-
-@app.post('/api/sql/generate')
-def generate_sql(body: SqlAskRequest):
-    item = _dataset_or_404(body.dataset_id)
-    query = deterministic_query(body.question, item) or generate_query(body.question, item, settings.gemini_api_key, settings.gemini_model)
-    if not query:
-        raise HTTPException(422, 'I could not find enough schema evidence to generate a query.')
-    try:
-        query = validate_readonly_sql(query)
-        result = execute_query(read_dataset_source(item), query)
-    except Exception as error:
-        raise HTTPException(422, f'I generated a query that could not be safely executed: {error}') from error
-    return result | {'sql': query, 'explanation': 'The query was generated from the detected schema, validated, and executed against the uploaded dataset.'}
-
-
 @app.get('/api/datasets/{dataset_id}/versions/{number}/download')
 def download_version(dataset_id: str, number: int):
     item = _dataset_or_404(dataset_id)
@@ -495,40 +489,6 @@ def download_version(dataset_id: str, number: int):
     return StreamingResponse(get_storage().stream(path), media_type='application/octet-stream', headers={'Content-Disposition': f'attachment; filename="{filename}"'})
 
 
-@app.post('/api/forecast')
-def create_forecast(values: list[float]):
-    return forecast(values)
-
-
-@app.post('/api/scenario')
-def run_scenario(body: ScenarioRequest):
-    return scenario(body.price_change, body.marketing_change, body.cost_change, body.baseline_revenue)
-
-
-def _requested_transformation(question: str) -> str | None:
-    """Map an explicit cleaning request to one safe, versioned operation."""
-    text = question.lower()
-    tokens = set(re.findall(r'[a-z]+', text))
-    action_words = ('fix', 'clean', 'standardize', 'normalize', 'format', 'remove', 'fill', 'correct', 'update')
-    if not any(word in tokens for word in action_words):
-        return None
-    if any(word in tokens for word in ('outlier', 'outliers', 'anomal')) or 'extreme value' in text:
-        return 'remove_outliers'
-    if any(word in tokens for word in ('duplicate', 'duplicates')) or 'repeated row' in text:
-        return 'remove_duplicates'
-    if any(word in tokens for word in ('missing', 'null', 'blank')):
-        return 'fill_missing'
-    if any(word in tokens for word in ('date', 'dates', 'timestamp')) or 'time format' in text:
-        return 'parse_dates'
-    if any(phrase in text for phrase in ('column name', 'field name', 'headers')):
-        return 'normalize_columns'
-    if any(word in tokens for word in ('whitespace', 'spaces', 'trim')):
-        return 'trim_text'
-    if any(word in tokens for word in ('format', 'formats', 'messy', 'standard', 'standardize')) or 'clean data' in text:
-        return 'standardize_format'
-    return None
-
-
 @app.post('/api/chat-legacy')
 def chat(body: ChatRequest):
     if not body.dataset_id:
@@ -541,7 +501,7 @@ def chat(body: ChatRequest):
     if body.question.strip().lower() in {'hi', 'hello', 'hey', 'hiya', 'good morning', 'good afternoon', 'good evening'}:
         return {'answer': f"Hi — I’m connected to {item['name']}. I found {profile.get('rows', 0)} rows and {profile.get('columns', 0)} detected fields. Ask me about trends, quality, categories, or values and I’ll investigate the source.", 'source': 'dataset-aware', 'sql': None, 'citations': [{'source': item['name'], 'score': 1.0}]}
     retrieved = retrieve(body.question, chunks_for(body.dataset_id))
-    query = deterministic_query(body.question, item) or generate_query(body.question, item, settings.gemini_api_key, settings.gemini_model)
+    query = deterministic_query(body.question, item) or generate_query(body.question, item)
     evidence: dict[str, Any] = {'profile': {'rows': profile.get('rows'), 'columns': profile.get('columns_list'), 'quality_score': profile.get('quality_score'), 'issues': profile.get('issues'), 'metrics': profile.get('metrics')}, 'retrieved_context': retrieved}
     if query:
         try:
@@ -569,13 +529,10 @@ def chat(body: ChatRequest):
             answer = f"I found {query_result.get('count', len(rows)):,} evidence rows with fields {', '.join(query_result.get('columns') or rows[0].keys())}. The exact returned records are shown below."
         return {'answer': answer, 'source': 'evidence-query', 'sql': query, 'query_result': query_result, 'citations': sources}
     if settings.gemini_api_key:
-        try:
-            from google import genai
-            prompt = f'''You are Pivot, a senior data analyst. Answer the question only from the evidence below. Do not invent facts, business labels, trends, or recommendations. If the evidence is insufficient, say exactly that. Include the relevant numbers and explain the query evidence in plain language. Never claim a transformation occurred unless the evidence says so.\n\nEvidence:\n{context}\n\nQuestion: {body.question}'''
-            response = genai.Client(api_key=settings.gemini_api_key).models.generate_content(model=settings.gemini_model, contents=prompt)
-            return {'answer': response.text or 'I could not produce an evidence-backed answer.', 'source': 'gemini-analyst', 'sql': query, 'query_result': evidence.get('query_result'), 'citations': sources}
-        except Exception:
-            pass
+        prompt = f'''You are Pivot, a senior data analyst. Answer the question only from the evidence below. Do not invent facts, business labels, trends, or recommendations. If the evidence is insufficient, say exactly that. Include the relevant numbers and explain the query evidence in plain language. Never claim a transformation occurred unless the evidence says so.\n\nEvidence:\n{context}\n\nQuestion: {body.question}'''
+        response = call_gemini(prompt)
+        if response:
+            return {'answer': response, 'source': 'gemini-analyst', 'sql': query, 'query_result': evidence.get('query_result'), 'citations': sources}
     query_result = evidence.get('query_result') or {}
     if query_result.get('count', 0) or retrieved or profile.get('issues'):
         rows = query_result.get('rows') or []
@@ -869,37 +826,10 @@ Dataset context:
 @app.post('/api/datasets/{dataset_id}/reports')
 def create_report(dataset_id: str, body: ReportRequest):
     item = _dataset_or_404(dataset_id)
-    profile = item.get('profile') or {}
-    overview_data = overview_payload(read_dataset_source(item), profile)
-    safe_title = re.sub(r'[^a-zA-Z0-9_-]+', '-', body.title or 'pivot-report').strip('-').lower() or 'pivot-report'
-    format_name = body.format.lower()
-    if format_name not in {'md', 'csv', 'pdf'}:
-        raise HTTPException(422, 'Reports currently support Markdown, CSV, and PDF.')
-    payload = {'dataset': item['name'], 'generated_at': pd.Timestamp.utcnow().isoformat(), 'profile': profile, 'overview': overview_data, 'versions': item['versions']}
-    if format_name == 'json':
-        content, media_type, suffix = json.dumps(payload, indent=2, default=str), 'application/json', 'json'
-    else:
-        markdown = f"# {body.title or 'Pivot report'}\n\nDataset: **{item['name']}**\n\n## Profile\n\n- Rows: {profile.get('rows', 0)}\n- Columns: {profile.get('columns', 0)}\n- Quality score: {profile.get('quality_score', 0)}/100\n\n## Detected issues\n\n" + '\n'.join(f"- {issue['type']}: {issue['count']} affected rows — {issue['impact']}" for issue in profile.get('issues', []))
-        if format_name == 'csv':
-            rows = [{'field': 'dataset', 'value': item['name']}, {'field': 'rows', 'value': profile.get('rows', 0)}, {'field': 'columns', 'value': profile.get('columns', 0)}, {'field': 'quality_score', 'value': profile.get('quality_score', 0)}]
-            content, media_type, suffix = pd.DataFrame(rows).to_csv(index=False), 'text/csv', 'csv'
-        elif format_name == 'pdf':
-            lines = markdown.replace('**', '').splitlines()
-            escape = lambda value: str(value).encode('latin-1', 'replace').decode('latin-1').replace('\\', '\\\\').replace('(', '\\(').replace(')', '\\)')
-            nl = chr(10)
-            stream = 'BT /F1 11 Tf 48 760 Td ' + ' '.join(f'({escape(line[:115])}) Tj 0 -16 Td' for line in lines[:42]) + ' ET'
-            objects = ['<< /Type /Catalog /Pages 2 0 R >>', '<< /Type /Pages /Kids [3 0 R] /Count 1 >>', '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>', '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>', f'<< /Length {len(stream.encode("latin-1", "replace"))} >>{nl}stream{nl}{stream}{nl}endstream']
-            pdf = '%PDF-1.4' + nl; offsets = [0]
-            for index, obj in enumerate(objects, 1): offsets.append(len(pdf.encode('latin-1'))); pdf += f'{index} 0 obj{nl}{obj}{nl}endobj{nl}'
-            xref = len(pdf.encode('latin-1')); pdf += f'xref{nl}0 {len(objects)+1}{nl}0000000000 65535 f {nl}' + ''.join(f'{offset:010d} 00000 n {nl}' for offset in offsets[1:]) + f'trailer << /Size {len(objects)+1} /Root 1 0 R >>{nl}startxref{nl}{xref}{nl}%%EOF'
-            content, media_type, suffix = pdf, 'application/pdf', 'pdf'
-        elif format_name == 'html':
-            content, media_type, suffix = f'<html><body><pre>{markdown}</pre></body></html>', 'text/html', 'html'
-        else:
-            content, media_type, suffix = markdown, 'text/markdown', 'md'
-    path = save_text(item, content, safe_title, f'.{suffix}')
-    report_id = add_report(dataset_id, body.title or 'Pivot report', format_name, path)
-    return {'id': report_id, 'title': body.title or 'Pivot report', 'format': format_name, 'download_url': f'/api/datasets/{dataset_id}/reports/{report_id}/download'}
+    try:
+        return create_dataset_report(item, body.title, body.format)
+    except ValueError as error:
+        raise HTTPException(422, str(error)) from error
 
 
 @app.get('/api/datasets/{dataset_id}/reports/{report_id}/download')

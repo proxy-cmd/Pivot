@@ -16,17 +16,20 @@ def generate(prompt: str) -> str | None:
     settings = get_settings()
     if not settings.gemini_api_key:
         return None
-    try:
-        from google import genai
 
-        response = genai.Client(api_key=settings.gemini_api_key).models.generate_content(
-            model=settings.gemini_model,
-            contents=prompt,
-        )
-        return response.text
-    except Exception:
-        logger.warning('Gemini call failed.')
+    try:
+        return generate_content(settings.gemini_api_key, settings.gemini_model, prompt)
+    except Exception as error:
+        logger.warning('Gemini call failed error=%s', type(error).__name__)
         return None
+
+
+def generate_content(api_key: str, model: str, prompt: str) -> str | None:
+    from google import genai
+
+    client = genai.Client(api_key=api_key)
+    response = client.models.generate_content(model=model, contents=prompt)
+    return response.text
 
 
 def parse_json_object(text: str | None) -> dict[str, Any] | None:
@@ -40,9 +43,10 @@ def parse_json_object(text: str | None) -> dict[str, Any] | None:
         cleaned = text.strip()
         if cleaned.startswith('{') and cleaned.endswith('}'):
             return json.loads(cleaned)
-        start, end = cleaned.find('{'), cleaned.rfind('}')
-        if start != -1 and end != -1:
-            return json.loads(cleaned[start:end + 1])
+        start_index = cleaned.find('{')
+        end_index = cleaned.rfind('}')
+        if start_index != -1 and end_index != -1:
+            return json.loads(cleaned[start_index:end_index + 1])
     except (TypeError, ValueError, json.JSONDecodeError):
         return None
     return None

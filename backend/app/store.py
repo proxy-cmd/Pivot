@@ -103,17 +103,77 @@ def finish_dataset(dataset_id: str, profile: dict):
 
 
 def _dataset_payload(dataset: Dataset) -> dict:
-    item = {'id': dataset.id, 'owner_user_id': dataset.owner_user_id, 'name': dataset.name, 'source_path': dataset.source_path, 'active_path': dataset.active_path, 'created_at': dataset.created_at, 'profile': json.loads(dataset.profile) if dataset.profile else None, 'status': dataset.status}
-    item['versions'] = [{'id': value.id, 'dataset_id': value.dataset_id, 'owner_user_id': value.owner_user_id, 'number': value.number, 'parent_id': value.parent_id, 'operation': value.operation, 'detail': value.detail, 'created_at': value.created_at} for value in sorted(dataset.versions, key=lambda value: value.number)]
-    item['pending_transformations'] = [{'id': value.id, 'dataset_id': value.dataset_id, 'owner_user_id': value.owner_user_id, 'operation': value.operation, 'status': value.status, 'preview_path': value.preview_path, 'metrics': json.loads(value.metrics or '{}'), 'created_at': value.created_at, 'resolved_at': value.resolved_at} for value in sorted((value for value in dataset.transformations if value.status == 'pending'), key=lambda value: value.created_at, reverse=True)]
-    item['active_version'] = 0
-    for version in item['versions']:
-        try:
-            if json.loads(version['detail']).get('output') == item['active_path']:
-                item['active_version'] = version['number']
-        except (TypeError, json.JSONDecodeError):
-            pass
-    return item
+    payload = dataset_summary(dataset)
+    payload['versions'] = version_payloads(dataset.versions)
+    payload['pending_transformations'] = pending_transformation_payloads(dataset.transformations)
+    payload['active_version'] = active_version_number(payload['versions'], dataset.active_path)
+    return payload
+
+
+def dataset_summary(dataset: Dataset) -> dict:
+    return {
+        'id': dataset.id,
+        'owner_user_id': dataset.owner_user_id,
+        'name': dataset.name,
+        'source_path': dataset.source_path,
+        'active_path': dataset.active_path,
+        'created_at': dataset.created_at,
+        'profile': json.loads(dataset.profile) if dataset.profile else None,
+        'status': dataset.status,
+    }
+
+
+def version_payloads(versions: list[Version]) -> list[dict]:
+    return [version_payload(version) for version in sorted(versions, key=lambda version: version.number)]
+
+
+def version_payload(version: Version) -> dict:
+    return {
+        'id': version.id,
+        'dataset_id': version.dataset_id,
+        'owner_user_id': version.owner_user_id,
+        'number': version.number,
+        'parent_id': version.parent_id,
+        'operation': version.operation,
+        'detail': version.detail,
+        'created_at': version.created_at,
+    }
+
+
+def pending_transformation_payloads(transformations: list[Transformation]) -> list[dict]:
+    pending = (entry for entry in transformations if entry.status == 'pending')
+    ordered = sorted(pending, key=lambda entry: entry.created_at, reverse=True)
+    return [transformation_payload(entry) for entry in ordered]
+
+
+def transformation_payload(transformation: Transformation) -> dict:
+    return {
+        'id': transformation.id,
+        'dataset_id': transformation.dataset_id,
+        'owner_user_id': transformation.owner_user_id,
+        'operation': transformation.operation,
+        'status': transformation.status,
+        'preview_path': transformation.preview_path,
+        'metrics': json.loads(transformation.metrics or '{}'),
+        'created_at': transformation.created_at,
+        'resolved_at': transformation.resolved_at,
+    }
+
+
+def active_version_number(versions: list[dict], active_path: str) -> int:
+    for version in versions:
+        output_path = version_output_path(version['detail'])
+        if output_path == active_path:
+            return version['number']
+
+    return 0
+
+
+def version_output_path(detail: str) -> str | None:
+    try:
+        return json.loads(detail).get('output')
+    except (TypeError, json.JSONDecodeError):
+        return None
 
 
 def get_dataset(dataset_id: str):

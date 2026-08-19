@@ -22,20 +22,24 @@ class TransformationError(ValueError):
 
 def preview(dataset: dict[str, Any], operation: str) -> dict[str, Any]:
     validate_operation(operation)
-    before = read_dataset_source(dataset)
-    after, metrics = apply(before.copy(), operation)
-    metrics = {**metrics, 'rows_before': len(before), 'rows_after': len(after)}
-    preview_path = save_frame(dataset, after, f'preview-{uuid4().hex}')
-    transformation_id = create_transformation(dataset['id'], operation, preview_path, metrics)
-    return preview_response(transformation_id, operation, before, after, metrics)
+    source_frame = read_dataset_source(dataset)
+    transformed_frame, metrics = apply(source_frame, operation)
+    preview_metrics = preview_metrics_for(source_frame, transformed_frame, metrics)
+
+    preview_path = save_preview(dataset, transformed_frame)
+    transformation_id = create_transformation(dataset['id'], operation, preview_path, preview_metrics)
+
+    return preview_response(transformation_id, operation, source_frame, transformed_frame, preview_metrics)
 
 
 def approve(dataset: dict[str, Any], transformation_id: str) -> dict[str, Any]:
     transformation = pending(dataset['id'], transformation_id)
-    cleaned = load_preview(transformation['preview_path'])
-    version = save_version(dataset, cleaned, transformation)
+    cleaned_frame = load_preview(transformation['preview_path'])
+    version = save_version(dataset, cleaned_frame, transformation)
+
     resolve_transformation(transformation_id, 'approved')
     get_storage().delete(transformation['preview_path'])
+
     return version
 
 
@@ -53,7 +57,12 @@ def validate_operation(operation: str) -> None:
 
 def pending(dataset_id: str, transformation_id: str) -> dict[str, Any]:
     transformation = get_transformation(transformation_id)
-    if not transformation or transformation['dataset_id'] != dataset_id or transformation['status'] != 'pending':
+    is_pending_for_dataset = (
+        transformation
+        and transformation['dataset_id'] == dataset_id
+        and transformation['status'] == 'pending'
+    )
+    if not is_pending_for_dataset:
         raise TransformationError('Pending transformation preview not found.')
     return transformation
 
@@ -70,16 +79,69 @@ def save_version(dataset: dict[str, Any], cleaned: pd.DataFrame, transformation:
     version_number = len(dataset['versions'])
     output_path = save_frame(dataset, cleaned, f'version-{version_number}')
     profile = profile_payload(cleaned, dataset['name'], dataset['id'])
-    detail = {'output': output_path, 'metrics': transformation['metrics'], 'profile': profile, 'source_unchanged': True}
-    version_id = add_version(dataset['id'], f'executed:{transformation["operation"]}', json.dumps(detail))
+    detail = version_detail(output_path, transformation['metrics'], profile)
+    operation = f'executed:{transformation["operation"]}'
+    version_id = add_version(dataset['id'], operation, json.dumps(detail))
+
     activate_dataset_version(dataset['id'], output_path, profile)
-    return {'ok': True, 'version': version_number, 'version_id': version_id, 'rows_before': transformation['metrics'].get('rows_before'), 'rows_after': transformation['metrics'].get('rows_after'), 'metrics': transformation['metrics'], 'output': str(output_path), 'profile': profile, 'source_unchanged': True}
+
+    return version_response(version_number, version_id, output_path, transformation['metrics'], profile)
 
 
 def preview_response(transformation_id: str, operation: str, before: pd.DataFrame, after: pd.DataFrame, metrics: dict[str, Any]) -> dict[str, Any]:
     before_preview = frame_preview(before)
     after_preview = frame_preview(after)
-    return {'id': transformation_id, 'operation': operation, 'metrics': metrics, 'rows_before': len(before), 'rows_after': len(after), 'before': {'rows': len(before), 'columns': [str(column) for column in before.columns], 'preview': before_preview}, 'after': {'rows': len(after), 'columns': [str(column) for column in after.columns], 'preview': after_preview}, 'before_preview': before_preview, 'after_preview': after_preview, 'source_unchanged': True}
+    return {
+        'id': transformation_id,
+        'operation': operation,
+        'metrics': metrics,
+        'rows_before': len(before),
+        'rows_after': len(after),
+        'before': frame_response(before, before_preview),
+        'after': frame_response(after, after_preview),
+        'before_preview': before_preview,
+        'after_preview': after_preview,
+        'source_unchanged': True,
+    }
+
+
+def preview_metrics_for(before: pd.DataFrame, after: pd.DataFrame, metrics: dict[str, Any]) -> dict[str, Any]:
+    return {**metrics, 'rows_before': len(before), 'rows_after': len(after)}
+
+
+def save_preview(dataset: dict[str, Any], frame: pd.DataFrame) -> str:
+    return save_frame(dataset, frame, f'preview-{uuid4().hex}')
+
+
+def version_detail(output_path: str, metrics: dict[str, Any], profile: dict[str, Any]) -> dict[str, Any]:
+    return {
+        'output': output_path,
+        'metrics': metrics,
+        'profile': profile,
+        'source_unchanged': True,
+    }
+
+
+def version_response(version_number: int, version_id: str, output_path: str, metrics: dict[str, Any], profile: dict[str, Any]) -> dict[str, Any]:
+    return {
+        'ok': True,
+        'version': version_number,
+        'version_id': version_id,
+        'rows_before': metrics.get('rows_before'),
+        'rows_after': metrics.get('rows_after'),
+        'metrics': metrics,
+        'output': str(output_path),
+        'profile': profile,
+        'source_unchanged': True,
+    }
+
+
+def frame_response(frame: pd.DataFrame, preview: list[dict[str, Any]]) -> dict[str, Any]:
+    return {
+        'rows': len(frame),
+        'columns': [str(column) for column in frame.columns],
+        'preview': preview,
+    }
 
 
 def frame_preview(frame: pd.DataFrame) -> list[dict[str, Any]]:
